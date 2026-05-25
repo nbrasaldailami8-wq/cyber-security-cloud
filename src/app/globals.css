@@ -1,0 +1,402 @@
+@import url("https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800;900&family=Tajawal:wght@300;400;500;700;800&family=JetBrains+Mono:wght@300;400;500;600;700&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ==================== الأساسيات ==================== */
+@layer base {
+  * {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+  }
+
+  html {
+    scroll-behavior: smooth;
+    direction: rtl;
+  }
+
+  body {
+    font-family: "Cairo", "Tajawal", sans-serif;
+    background-color: #010204;
+    color: #e6edf3;
+    overflow-x: hidden;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: #0d1117;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: #30363d;
+    border-radius: 3px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: #00e5ff;
+  }
+}
+
+/* ==================== طبقات الخلفية ==================== */
+@layer components {
+  /* شبكة كمومية */
+  .quantum-grid {
+    background-image:
+      linear-gradient(rgba(0, 229, 255, 0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0, 229, 255, 0.03) 1px, transparent 1px);
+    background-size: 50px 50px;
+    background-position: center center;
+  }
+
+  /* مطر الماتريكس */
+  .matrix-rain {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  /* تأثير زجاجي */
+  .glass {
+    background: rgba(13, 17, 23, 0.92);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(48, 54, 61, 0.5);
+    border-radius: 12px;
+  }
+
+  .glass-card {
+    background: rgba(22, 27, 34, 0.85);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid #30363d;
+    border-radius: 12px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+    transition: all 0.3s ease;
+  }
+
+  .glass-card:hover {
+    border-color: rgba(0, 229, 255, 0.3);
+    box-shadow:
+      0 4px 16px rgba(0, 0, 0, 0.2),
+      0 0 15px rgba(0, 229, 255, 0.08);
+  }
+
+  .glass-sidebar {
+    background: rgba(13, 17, 23, 0.98);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border-left: 1px solid #30363d;
+  }
+
+  /* تأثير نيون */
+  .neon-border {
+    border: 1px solid rgba(0, 229, 255, 0.3);
+    box-shadow:
+      0 0 10px rgba(0, 229, 255, 0.1),
+      inset 0 0 10px rgba(0, 229, 255, 0.05);
+    transition: all 0.3s ease;
+  }
+
+  .neon-border:hover {
+    border-color: rgba(0, 229, 255, 0.6);
+    box-shadow:
+      0 0 15px rgba(0, 229, 255, 0.2),
+      inset 0 0 15px rgba(0, 229, 255, 0.08);
+  }
+
+  .neon-glow {
+    box-shadow:
+      0 0 15px rgba(0, 229, 255, 0.3),
+      0 0 30px rgba(0, 229, 255, 0.1);
+  }
+
+  /* حقل إدخال */
+  .input-field {
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 12px 16px;
+    color: #e6edf3;
+    font-family: "Cairo", sans-serif;
+    transition: all 0.3s ease;
+    width: 100%;
+  }
+
+  .input-field:hover {
+    border-color: rgba(0, 229, 255, 0.3);
+  }
+
+  .input-field:focus {
+    outline: none;
+    border-color: #00e5ff;
+    box-shadow: 0 0 10px rgba(0, 229, 255, 0.2);
+  }
+
+  /* أزرار */
+  .btn-primary {
+    background: #00e5ff;
+    color: #010204;
+    border: none;
+    border-radius: 8px;
+    padding: 12px 24px;
+    font-family: "Cairo", sans-serif;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    box-shadow: 0 0 15px rgba(0, 229, 255, 0.3);
+  }
+
+  .btn-primary:hover {
+    box-shadow: 0 0 25px rgba(0, 229, 255, 0.5);
+    transform: translateY(-2px);
+  }
+
+  .btn-primary:active {
+    transform: translateY(0px);
+  }
+
+  .btn-danger {
+    background: #ff3131;
+    color: #ffffff;
+    border: none;
+    border-radius: 8px;
+    padding: 12px 24px;
+    font-family: "Cairo", sans-serif;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s ease;
+  }
+
+  .btn-success {
+    background: #2ea043;
+    color: #ffffff;
+    border: none;
+    border-radius: 8px;
+    padding: 12px 24px;
+    font-family: "Cairo", sans-serif;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s ease;
+  }
+
+  .btn-glass {
+    background: rgba(22, 27, 34, 0.85);
+    backdrop-filter: blur(10px);
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 12px 24px;
+    color: #e6edf3;
+    font-family: "Cairo", sans-serif;
+    cursor: pointer;
+    transition: all 0.3s ease;
+  }
+
+  .btn-glass:hover {
+    border-color: #00e5ff;
+    background: rgba(0, 229, 255, 0.1);
+    box-shadow: 0 0 15px rgba(0, 229, 255, 0.15);
+    transform: translateY(-1px);
+  }
+
+  .btn-glass:active {
+    transform: translateY(0px);
+  }
+}
+
+/* ==================== أنيميشن ==================== */
+@layer utilities {
+  .animate-scan-line {
+    animation: scanLine 3s linear infinite;
+  }
+
+  .animate-float {
+    animation: float 6s ease-in-out infinite;
+  }
+
+  .animate-fade-in {
+    animation: fadeIn 0.5s ease-out forwards;
+  }
+
+  .animate-slide-up {
+    animation: slideUp 0.5s ease-out forwards;
+  }
+
+  .animate-slide-down {
+    animation: slideDown 0.4s ease-out forwards;
+  }
+
+  .animate-scale-in {
+    animation: scaleIn 0.3s ease-out forwards;
+  }
+
+  .animate-pulse-glow {
+    animation: pulseGlow 2s ease-in-out infinite;
+  }
+
+  .animate-shimmer {
+    background: linear-gradient(
+      90deg,
+      rgba(0, 229, 255, 0.02) 25%,
+      rgba(0, 229, 255, 0.08) 50%,
+      rgba(0, 229, 255, 0.02) 75%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.5s ease-in-out infinite;
+  }
+
+  .animate-border-glow {
+    animation: borderGlow 3s ease-in-out infinite;
+  }
+
+  .animate-rotate-slow {
+    animation: rotateSlow 20s linear infinite;
+  }
+
+  .animate-text-glow {
+    animation: textGlow 2s ease-in-out infinite alternate;
+  }
+
+  .animate-data-flow {
+    background: linear-gradient(90deg, transparent, rgba(0, 229, 255, 0.3), transparent);
+    background-size: 200% 100%;
+    animation: dataFlow 2s linear infinite;
+  }
+}
+
+/* ==================== Keyframes ==================== */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(30px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideDown {
+  from { opacity: 0; transform: translateY(-20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes pulseGlow {
+  0%, 100% { box-shadow: 0 0 8px rgba(0, 229, 255, 0.2); }
+  50% { box-shadow: 0 0 20px rgba(0, 229, 255, 0.4); }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+@keyframes borderGlow {
+  0%, 100% { border-color: rgba(0, 229, 255, 0.2); }
+  50% { border-color: rgba(0, 229, 255, 0.5); }
+}
+
+@keyframes scanLine {
+  0% { top: 0; opacity: 0.3; }
+  50% { opacity: 0.6; }
+  100% { top: 100%; opacity: 0.1; }
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0px); }
+  50% { transform: translateY(-10px); }
+}
+
+@keyframes rotateSlow {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes textGlow {
+  from { text-shadow: 0 0 7px rgba(0, 229, 255, 0.3); }
+  to { text-shadow: 0 0 20px rgba(0, 229, 255, 0.6), 0 0 40px rgba(0, 229, 255, 0.2); }
+}
+
+@keyframes dataFlow {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+/* ==================== تأثيرات خاصة ==================== */
+.neon-text {
+  color: #00e5ff;
+  text-shadow:
+    0 0 7px rgba(0, 229, 255, 0.5),
+    0 0 14px rgba(0, 229, 255, 0.3);
+}
+
+/* خط المسح الراداري */
+.scan-line {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 2px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(0, 229, 255, 0.4),
+    transparent
+  );
+  box-shadow: 0 0 10px rgba(0, 229, 255, 0.3);
+  z-index: 100;
+  pointer-events: none;
+}
+
+/* تأثير الخلفية المضببة */
+.bg-blur {
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+/* ==================== Hover Effects ==================== */
+.hover-glow {
+  transition: all 0.3s ease;
+}
+.hover-glow:hover {
+  box-shadow:
+    0 0 15px rgba(0, 229, 255, 0.3),
+    0 0 30px rgba(0, 229, 255, 0.1);
+  border-color: rgba(0, 229, 255, 0.5);
+  transform: translateY(-2px);
+}
+
+.hover-scale {
+  transition: all 0.3s ease;
+}
+.hover-scale:hover {
+  transform: scale(1.02);
+}
+
+.hover-border {
+  transition: border-color 0.3s ease;
+}
+.hover-border:hover {
+  border-color: rgba(0, 229, 255, 0.5);
+}
+
+.hover-lift {
+  transition: all 0.3s ease;
+}
+.hover-lift:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.3);
+}

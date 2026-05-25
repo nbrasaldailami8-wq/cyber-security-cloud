@@ -1,0 +1,13 @@
+{
+  "name": "سحابة الأمن السيبراني",
+  "short_name": "سحابة الأمن",
+  "description": "بيئة تعليمية تفاعلية لطلاب ومعلمي كلية الأمن السيبراني - جامعة ذمار",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#010204",
+  "theme_color": "#00e5ff",
+  "orientation": "portrait-primary",
+  "lang": "ar",
+  "dir": "rtl",
+  "icons": []
+}

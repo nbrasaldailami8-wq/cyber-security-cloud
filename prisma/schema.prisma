@@ -1,0 +1,569 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==================== الأدوار ====================
+enum UserRole {
+  ADMIN
+  MANAGEMENT
+  TEACHER
+  STUDENT
+}
+
+enum AcademicLevel {
+  LEVEL_1
+  LEVEL_2
+  LEVEL_3
+  LEVEL_4
+}
+
+enum Semester {
+  TERM_1
+  TERM_2
+}
+
+enum AccountStatus {
+  PENDING
+  ACTIVE
+  LOCKED
+  SUSPENDED
+}
+
+// ==================== المستخدمين ====================
+model User {
+  id                 String        @id @default(uuid())
+  name               String
+  email              String        @unique
+  passwordHash       String
+  role               UserRole
+  level              AcademicLevel?
+  status             AccountStatus @default(PENDING)
+  activationCodeHash String?
+  activationExpires  DateTime?
+  isActivated        Boolean       @default(false)
+  twoFactorEnabled   Boolean       @default(false)
+  twoFactorSecret    String?
+  webAuthnEnabled    Boolean       @default(false)
+  webAuthnCredential String?
+  webAuthnDeviceId   String?
+  lastLoginAt        DateTime?
+  lastSeenAt         DateTime?
+  managementLevel    AcademicLevel?
+  previousLevel      AcademicLevel?
+  lastLoginIp        String?
+  failedLoginAttempts Int          @default(0)
+  lockedUntil        DateTime?
+  tokenVersion       Int          @default(0)
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+  deletedAt          DateTime?
+
+  // العلاقات
+  messagesSent           Message[]     @relation("SentMessages")
+  messagesReceived       Message[]     @relation("ReceivedMessages")
+  notifications          Notification[]
+  auditLogs              AuditLog[]
+  publishedContent       Content[]
+  publishedAnnouncements Announcement[]
+  gradeDistributions     GradeDistribution[]
+  uploadPermissions      UploadPermission[]
+  sentAssignments        Assignment[]
+  evaluatedAssignments   Assignment[]     @relation("EvaluatedAssignments")
+  sessions               Session[]
+  tokenFamilies          TokenFamily[]
+  subjectsTaught         Subject[]        @relation("TeacherSubjects")
+  promotionRequests      PromotionRequest[] @relation("PromotionRequestedBy")
+  webAuthnCredentials    WebAuthnCredential[]
+  webAuthnChallenges     WebAuthnChallenge[]
+
+  @@index([role])
+  @@index([level])
+  @@index([status])
+  @@index([deletedAt])
+  @@map("users")
+}
+
+// ==================== الجلسات ====================
+model Session {
+  id               String    @id @default(uuid())
+  userId           String
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  refreshTokenHash String    @unique
+  deviceInfo       String?
+  ipAddress        String?
+  expiresAt        DateTime
+  createdAt        DateTime  @default(now())
+  revokedAt        DateTime?
+  mfaVerifiedAt    DateTime?
+
+  @@index([userId])
+  @@index([userId, expiresAt])
+  @@index([refreshTokenHash])
+  @@map("sessions")
+}
+
+// ==================== عائلات التوكن (للـ Refresh Rotation) ====================
+model TokenFamily {
+  id            String   @id @default(uuid())
+  userId        String
+  deviceInfo    String?
+  ipAddress     String?
+  userAgent     String?
+  mfaVerifiedAt DateTime?
+  compromisedAt DateTime?
+  createdAt     DateTime @default(now())
+  revokedAt     DateTime?
+
+  user        User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  generations TokenGeneration[]
+
+  @@index([userId])
+  @@index([userId, revokedAt])
+  @@map("token_families")
+}
+
+// ==================== أجيال التوكن (سجل الـ Refresh Rotation) ====================
+model TokenGeneration {
+  id                String           @id @default(uuid())
+  familyId          String
+  generation        Int
+  refreshTokenHash  String           @unique
+  parentGenerationId String?
+  ipAddress         String?
+  userAgent         String?
+  createdAt         DateTime         @default(now())
+  revokedAt         DateTime?
+
+  family           TokenFamily        @relation(fields: [familyId], references: [id], onDelete: Cascade)
+  parentGeneration TokenGeneration?  @relation("TokenGenerationChain", fields: [parentGenerationId], references: [id])
+  children         TokenGeneration[] @relation("TokenGenerationChain")
+
+  @@index([familyId])
+  @@index([familyId, generation])
+  @@index([refreshTokenHash])
+  @@index([createdAt])
+  @@map("token_generations")
+}
+
+// ==================== المواد الدراسية ====================
+model Subject {
+  id        String        @id @default(uuid())
+  name      String
+  code      String        @unique
+  level     AcademicLevel
+  semester  Semester      @default(TERM_1)
+  isActive  Boolean       @default(true)
+  isVisible Boolean       @default(true)
+  teacherId String?
+  teacher   User?         @relation("TeacherSubjects", fields: [teacherId], references: [id])
+  createdAt DateTime      @default(now())
+  deletedAt DateTime?
+
+  assignments   Assignment[]
+  content       Content[]
+  gradeDistributions GradeDistribution[]
+
+  @@index([level])
+  @@index([deletedAt])
+  @@index([teacherId])
+  @@index([semester])
+  @@map("subjects")
+}
+
+// ==================== الرسائل ====================
+model Message {
+  id               String    @id @default(uuid())
+  senderId         String
+  receiverId       String
+  replyToId        String?
+  subject          String?
+  body             String
+  encrypted        Boolean   @default(false)
+  isRead           Boolean   @default(false)
+  isEdited         Boolean   @default(false)
+  isBlocked        Boolean   @default(false)
+  senderDeleted    Boolean   @default(false)
+  receiverDeleted  Boolean   @default(false)
+  idempotencyKey   String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  deletedAt        DateTime?
+
+  sender       User      @relation("SentMessages", fields: [senderId], references: [id])
+  receiver     User      @relation("ReceivedMessages", fields: [receiverId], references: [id])
+  replyTo      Message?  @relation("MessageReplies", fields: [replyToId], references: [id])
+  replies      Message[] @relation("MessageReplies")
+
+  @@unique([senderId, idempotencyKey])
+  @@index([senderId, senderDeleted, createdAt(sort: Desc)])
+  @@index([receiverId, receiverDeleted, createdAt(sort: Desc)])
+  @@index([senderId, receiverId, createdAt(sort: Desc)])
+  @@index([receiverId, senderId, createdAt(sort: Desc)])
+  @@index([createdAt(sort: Desc)])
+  @@index([deletedAt])
+  @@index([isBlocked])
+  @@map("messages")
+}
+
+// ==================== المحتوى التعليمي ====================
+enum ContentType {
+  PDF
+  DOCX
+  XLSX
+  PNG
+  JPG
+  YOUTUBE_LINK
+}
+
+model Content {
+  id          String      @id @default(uuid())
+  title       String
+  description String?
+  type        ContentType
+  fileUrl     String?
+  youtubeUrl  String?
+  fileSize    Int?
+  
+  subjectId   String?
+  subject     Subject?    @relation(fields: [subjectId], references: [id])
+  level       AcademicLevel
+  semester    Semester    @default(TERM_1)
+  publisherId String
+  publisher   User        @relation(fields: [publisherId], references: [id])
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  deletedAt   DateTime?
+  version     Int         @default(1)
+
+  @@index([level])
+  @@index([level, subjectId])
+  @@index([publisherId])
+  @@index([deletedAt])
+  @@index([createdAt(sort: Desc)])
+  @@map("content")
+}
+
+// ==================== التعميمات ====================
+model Announcement {
+  id          String        @id @default(uuid())
+  title       String
+  description String
+  level       AcademicLevel
+  publisherId String
+  publisher   User          @relation(fields: [publisherId], references: [id])
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  deletedAt   DateTime?
+
+  @@index([level])
+  @@index([publisherId])
+  @@index([deletedAt])
+  @@map("announcements")
+}
+
+// ==================== التكاليف ====================
+model Assignment {
+  id            String       @id @default(uuid())
+  studentId     String
+  student       User         @relation(fields: [studentId], references: [id])
+  subjectId     String
+  subject       Subject      @relation(fields: [subjectId], references: [id])
+  fileUrl       String
+  fileName      String
+  fileSize      Int
+  grade         Float?
+  feedback      String?
+  evaluatedAt   DateTime?
+  evaluatorId   String?
+  evaluator     User?        @relation("EvaluatedAssignments", fields: [evaluatorId], references: [id])
+  status        String       @default("pending")
+  semester      Semester     @default(TERM_1)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  deletedAt     DateTime?
+
+  @@index([studentId, subjectId])
+  @@index([studentId, status])
+  @@index([subjectId])
+  @@index([subjectId, status])
+  @@index([deletedAt])
+  @@index([status])
+  @@index([evaluatorId])
+  @@map("assignments")
+}
+
+// ==================== توزيع الدرجات ====================
+model GradeDistribution {
+  id          String        @id @default(uuid())
+  teacherId   String
+  teacher     User          @relation(fields: [teacherId], references: [id])
+  subjectId   String
+  subject     Subject       @relation(fields: [subjectId], references: [id])
+  fileUrl     String
+  fileName    String
+  studentsCount Int
+  distributionData Json?
+  level       AcademicLevel
+  semester    Semester      @default(TERM_1)
+  createdAt   DateTime      @default(now())
+  deletedAt   DateTime?
+
+  @@index([teacherId, subjectId])
+  @@index([level])
+  @@map("grade_distributions")
+}
+
+// ==================== الإشعارات ====================
+enum NotificationType {
+  NEW_MESSAGE
+  ASSIGNMENT_EVALUATED
+  NEW_ASSIGNMENT
+  NEW_ANNOUNCEMENT
+  NEW_CONTENT
+  GRADES_DISTRIBUTED
+  ACCOUNT_MODIFIED
+  LEVEL_PROMOTED
+}
+
+model Notification {
+  id        String           @id @default(uuid())
+  userId    String
+  user      User             @relation(fields: [userId], references: [id])
+  type      NotificationType
+  title     String
+  body      String
+  linkUrl   String?
+  isRead    Boolean          @default(false)
+  createdAt DateTime         @default(now())
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([userId, isRead, createdAt(sort: Desc)])
+  @@index([userId, type, createdAt(sort: Desc)])
+  @@map("notifications")
+}
+
+// ==================== صلاحيات الرفع ====================
+model UploadPermission {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  grantedBy String
+  grantedAt DateTime @default(now())
+  revokedAt DateTime?
+
+  @@index([userId])
+  @@index([revokedAt])
+  @@map("upload_permissions")
+}
+
+// ==================== سجل العمليات ====================
+enum AuditAction {
+  LOGIN
+  LOGOUT
+  CREATE
+  UPDATE
+  DELETE
+  UPLOAD
+  DOWNLOAD
+  EVALUATE
+  PUBLISH
+  FAILED_LOGIN
+  SUSPICIOUS_ACTIVITY
+  LEVEL_PROMOTION
+  PROMOTED
+  SEMESTER_SWITCH
+}
+
+enum SeverityLevel {
+  INFO
+  WARNING
+  ERROR
+  CRITICAL
+}
+
+model AuditLog {
+  id          String        @id @default(uuid())
+  userId      String?
+  user        User?         @relation(fields: [userId], references: [id])
+  action      AuditAction
+  severity    SeverityLevel @default(INFO)
+  description String
+  ipAddress   String?
+  deviceInfo  String?
+  level       AcademicLevel?
+  metadata    Json?
+  createdAt   DateTime      @default(now())
+
+  @@index([userId])
+  @@index([action])
+  @@index([severity])
+  @@index([createdAt(sort: Desc)])
+  @@map("audit_logs")
+}
+
+// ==================== رموز التفعيل ====================
+model ActivationCode {
+  id        String        @id @default(uuid())
+  codeHash  String        @unique
+  level     AcademicLevel
+  role      UserRole
+  subjectId String?
+  usedAt    DateTime?
+  usedBy    String?
+  createdAt DateTime      @default(now())
+  expiresAt DateTime
+
+  @@index([level])
+  @@index([role])
+  @@index([usedAt])
+  @@index([expiresAt])
+  @@map("activation_codes")
+}
+
+// ==================== رموز إعادة تعيين كلمة المرور ====================
+model PasswordResetToken {
+  id        String    @id @default(uuid())
+  tokenHash String    @unique
+  userId    String
+  email     String
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([tokenHash])
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("password_reset_tokens")
+}
+
+// ==================== طلبات ترقية المستوى ====================
+enum PromotionStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model PromotionRequest {
+  id           String          @id @default(uuid())
+  userId       String
+  user         User            @relation("PromotionRequestedBy", fields: [userId], references: [id])
+  fromLevel    AcademicLevel
+  toLevel      AcademicLevel
+  status       PromotionStatus @default(PENDING)
+  approvedBy   String?
+  approvedAt   DateTime?
+  createdAt    DateTime        @default(now())
+
+  @@index([userId])
+  @@index([status])
+  @@index([toLevel])
+  @@map("promotion_requests")
+}
+
+// ==================== تحديات MFA المؤقتة ====================
+model MfaChallenge {
+  id            String    @id @default(uuid())
+  challengeHash String    @unique
+  userId        String
+  ipAddress     String?
+  userAgent     String?
+  expiresAt     DateTime
+  usedAt        DateTime?
+  createdAt     DateTime   @default(now())
+
+  @@index([challengeHash])
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("mfa_challenges")
+}
+
+// ==================== بيانات اعتماد WebAuthn (مصادقة البصمة) ====================
+model WebAuthnCredential {
+  id             String    @id @default(uuid())
+  userId         String
+  credentialId   String    @unique
+  publicKey      Bytes
+  signCount      Int       @default(0)
+  transports     String[]
+  backupEligible Boolean   @default(false)
+  backupState    Boolean   @default(false)
+  deviceName     String?
+  createdAt      DateTime  @default(now())
+  lastUsedAt     DateTime?
+  revokedAt      DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([userId, revokedAt])
+  @@map("web_authn_credentials")
+}
+
+// ==================== تحديات WebAuthn المؤقتة ====================
+model WebAuthnChallenge {
+  id            String    @id @default(uuid())
+  challengeHash String    @unique
+  userId        String
+  purpose       String    // "registration" | "authentication"
+  ipAddress     String?
+  userAgent     String?
+  expiresAt     DateTime
+  usedAt        DateTime?
+  createdAt     DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([challengeHash])
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("web_authn_challenges")
+}
+
+// ==================== سجل التوليد ====================
+model GenerationLog {
+  id              String        @id @default(uuid())
+  name            String
+  email           String?
+  role            UserRole
+  level           AcademicLevel
+  code            String
+  subjectName     String?
+  subjectCode     String?
+  semester        Semester?
+  generatedById   String
+  generatedByName String?
+  createdAt       DateTime      @default(now())
+  deletedAt       DateTime?
+
+  @@index([level])
+  @@index([role])
+  @@index([deletedAt])
+  @@map("generation_logs")
+}
+
+// ==================== اشتراكات الإشعارات (PWA Push) ====================
+model PushSubscription {
+  id         String   @id @default(uuid())
+  userId     String   @unique
+  endpoint   String
+  authKey    String
+  p256dhKey  String
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+  @@map("push_subscriptions")
+}
+
+// ==================== إعدادات النظام ====================
+model SystemConfig {
+  id    String @id @default(uuid())
+  key   String @unique
+  value String
+
+  @@map("system_configs")
+}
