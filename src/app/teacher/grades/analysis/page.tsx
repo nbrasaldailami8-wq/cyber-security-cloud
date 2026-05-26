@@ -10,8 +10,6 @@ import { useToast } from "@/components/ui/Toast";
 import PageTransition from "@/components/layout/PageTransition";
 import { useAuthStore } from "@/store/authStore";
 import { csrfFetch } from "@/lib/csrfClient";
-import { useSupabaseRealtime } from "@/hooks/useSupabaseRealtime";
-
 interface AnalysisRecord {
   id: string;
   fileName: string;
@@ -79,10 +77,6 @@ export default function AnalysisListPage() {
   const { showToast } = useToast();
   const userName = user?.name || "";
   const userId = user?.id || "";
-
-  useSupabaseRealtime(`user-${userId}`, "notification", () => {
-    loadRecords();
-  });
 
   const [records, setRecords] = useState<AnalysisRecord[]>([]);
   const [loading, setLoading] = useState(true);

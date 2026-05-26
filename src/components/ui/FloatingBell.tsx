@@ -1,12 +1,14 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import { useToast } from "@/components/ui/Toast";
 import { useAuthStore } from "@/store/authStore";
 import { csrfFetch } from "@/lib/csrfClient";
 import { useSupabaseRealtime } from "@/hooks/useSupabaseRealtime";
+import { trackNotifRefresh, trackNotifDedup, trackNotifReconnect } from "@/lib/realtimeDiagnostics";
+import { isAudioAuthorized, trackAudioPlayed, trackAudioSkippedHidden, trackAudioSkippedThrottle, trackAudioSkippedInactiveTab, trackAudioSkippedUnmounted, trackAudioDuplicatePrevented } from "@/lib/supabaseRealtime";
 
 interface NotificationItem {
   id: string;
@@ -54,6 +56,47 @@ export default function FloatingBell() {
 
   const userId = user?.id || "";
 
+  const mountedRef = useRef(true);
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const processedIdsRef = useRef<Set<string>>(new Set());
+  const lastSoundTimeRef = useRef(0);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const prevConnectionRef = useRef<string>("disconnected");
+  const reconnectCooldownRef = useRef(0);
+  const MAX_PROCESSED_IDS = 500;
+
+  // تنظيف معرفات التكرار: إزالة الأقدم عند تجاوز الحد
+  const markIdProcessed = useCallback((id: string) => {
+    processedIdsRef.current.add(id);
+    setTimeout(() => {
+      processedIdsRef.current?.delete(id);
+    }, 60000);
+    // Hard cap: إزالة الأقدم عند تجاوز الحد (Set يحافظ على ترتيب الإدراج)
+    if (processedIdsRef.current.size > MAX_PROCESSED_IDS) {
+      const toRemove = processedIdsRef.current.size - MAX_PROCESSED_IDS;
+      const values = processedIdsRef.current.values();
+      for (let i = 0; i < toRemove; i++) {
+        const entry = values.next();
+        if (entry.done) break;
+        processedIdsRef.current.delete(entry.value);
+      }
+    }
+  }, []);
+
+  // جدولة تحديث الإشعارات: نقطة تمرير واحدة لكل المشغلات
+  const loadNotifRef = useRef<() => void>(() => {});
+  useEffect(() => { loadNotifRef.current = loadNotifications; });
+  const scheduleNotificationRefresh = useCallback(() => {
+    if (refreshTimerRef.current) return;
+    refreshTimerRef.current = setTimeout(() => {
+      refreshTimerRef.current = null;
+      if (mountedRef.current) {
+        trackNotifRefresh();
+        loadNotifRef.current();
+      }
+    }, 300);
+  }, []);
+
   // ==================== تحميل الإشعارات ====================
   const loadNotifications = useCallback(async () => {
     if (!userId) return;
@@ -72,22 +115,81 @@ export default function FloatingBell() {
   }, [userId]);
 
   useEffect(() => {
+    mountedRef.current = true;
+    const processedIds = processedIdsRef.current;
     loadNotifications();
+    return () => {
+      mountedRef.current = false;
+      if (refreshTimerRef.current) {
+        clearTimeout(refreshTimerRef.current);
+        refreshTimerRef.current = null;
+      }
+      processedIds.clear();
+      prevConnectionRef.current = "disconnected";
+      reconnectCooldownRef.current = 0;
+    };
   }, [loadNotifications]);
 
   // ==================== Supabase Realtime للحظية ====================
-  useSupabaseRealtime(`user-${userId}`, "notification", (data: any) => {
-    loadNotifications();
-    // تشغيل صوت الإشعار
-    try {
-      const audio = new Audio("/sounds/notification.mp3");
-      audio.volume = 0.5;
-      audio.play().catch(() => {});
-    } catch {}
-    if (data.title && data.body) {
-      showToast(`🔔 ${data.title}: ${data.body}`, "info");
+  const { connectionState } = useSupabaseRealtime(
+    `user-${userId}`,
+    "notification",
+    (data: any) => {
+      // تجاهل الإشعارات المكررة عبر تتبع المعرفات في الذاكرة
+      if (data.id) {
+        if (processedIdsRef.current.has(data.id)) {
+          trackNotifDedup();
+          trackAudioDuplicatePrevented();
+          return;
+        }
+        markIdProcessed(data.id);
+      }
+
+      // تجميع التحديثات المتتالية عبر المجدول الموحد (300ms)
+      scheduleNotificationRefresh();
+
+      // Audio guards: block sound only, not toast/state
+      let shouldPlaySound = true;
+      if (!mountedRef.current) { trackAudioSkippedUnmounted(); shouldPlaySound = false; }
+      else if (document.visibilityState !== "visible") { trackAudioSkippedHidden(); shouldPlaySound = false; }
+      else if (pathname.startsWith("/chat")) { shouldPlaySound = false; }
+      else if (!isAudioAuthorized()) { trackAudioSkippedInactiveTab(); shouldPlaySound = false; }
+      if (shouldPlaySound) {
+        const now = Date.now();
+        if (now - lastSoundTimeRef.current >= 1000) {
+          lastSoundTimeRef.current = now;
+          try {
+            if (!audioRef.current) {
+              audioRef.current = new Audio("/sounds/notification.mp3");
+            }
+            audioRef.current.volume = 0.5;
+            audioRef.current.currentTime = 0;
+            audioRef.current.play().catch(() => {});
+          } catch {}
+          trackAudioPlayed();
+        } else {
+          trackAudioSkippedThrottle();
+        }
+      }
+
+      if (data.title && data.body) {
+        showToast(`🔔 ${data.title}: ${data.body}`, "info");
+      }
+    },
+  );
+
+  // استرداد الإشعارات بعد إعادة الاتصال مع cooldown لمنع التكرار
+  useEffect(() => {
+    const prev = prevConnectionRef.current;
+    prevConnectionRef.current = connectionState;
+    if (prev === "reconnecting" && connectionState === "connected") {
+      if (mountedRef.current && Date.now() - reconnectCooldownRef.current >= 2000) {
+        reconnectCooldownRef.current = Date.now();
+        trackNotifReconnect();
+        scheduleNotificationRefresh();
+      }
     }
-  });
+  }, [connectionState, scheduleNotificationRefresh]);
 
   // ==================== تحديد كمقروء والتوجيه ====================
   const handleClickNotification = async (notif: NotificationItem) => {
@@ -138,7 +240,7 @@ export default function FloatingBell() {
         whileTap={{ scale: 0.92 }}
         onClick={() => {
           setShowPopup(!showPopup);
-          if (!showPopup) loadNotifications();
+          if (!showPopup) scheduleNotificationRefresh();
         }}
         style={{
           position: "fixed",

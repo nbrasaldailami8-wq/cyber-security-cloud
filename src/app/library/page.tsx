@@ -268,10 +268,6 @@ export default function LibraryPage() {
   useSupabaseRealtime(deriveStaticChannelName(`library-level-${userLevel}`), "content-deleted", () => {
     loadContent();
   });
-  useSupabaseRealtime(`user-${userId}`, "notification", () => {
-    loadContent();
-  });
-
   // ==================== تحميل المحتوى ====================
   const loadContent = useCallback(async () => {
     try {

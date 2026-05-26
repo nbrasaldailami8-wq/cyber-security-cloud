@@ -12,9 +12,7 @@ import {
 } from "@simplewebauthn/browser";
 import { useAuthStore } from "@/store/authStore";
 import { useToast } from "@/components/ui/Toast";
-import { getSiteKey } from "@/lib/captcha";
 import { registerPushNotifications } from "@/lib/pushClient";
-import HCaptcha from "@hcaptcha/react-hcaptcha";
 // @ts-ignore
 const OnboardingScene = dynamic(
   () => import("@/components/effects/OnboardingScene"),
@@ -45,7 +43,6 @@ export default function LoginPage() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
-  const [captchaToken, setCaptchaToken] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [clock, setClock] = useState("00:00:00 AM");
@@ -59,6 +56,11 @@ export default function LoginPage() {
   } | null>(null);
   const [webAuthnRegistering, setWebAuthnRegistering] = useState(false);
   const [webAuthnDone, setWebAuthnDone] = useState(false);
+
+  // Refs for pre-fetched WebAuthn options (preserve user gesture for WebAuthn API)
+  const webAuthnLoginOptRef = useRef<any>(null);
+  const webAuthnLoginUserIdRef = useRef<string | null>(null);
+  const webAuthnRegOptRef = useRef<any>(null);
 
   // استعادة كلمة المرور
   const [forgotStep, setForgotStep] = useState<ForgotStep>("email");
@@ -75,15 +77,6 @@ export default function LoginPage() {
   const [showActivateHelp, setShowActivateHelp] = useState(false);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const captchaRef = useRef<HTMLDivElement>(null);
-
-  const onCaptchaVerify = useCallback((token: string) => {
-    setCaptchaToken(token);
-  }, []);
-
-  const onCaptchaExpire = useCallback(() => {
-    setCaptchaToken("");
-  }, []);
 
   // ==================== الساعة الرقمية ====================
   useEffect(() => {
@@ -99,14 +92,6 @@ export default function LoginPage() {
     update();
     const timer = setInterval(update, 1000);
     return () => clearInterval(timer);
-  }, []);
-
-  // ==================== CAPTCHA ====================
-  useEffect(() => {
-    // في وضع التطوير: نمرر token وهمي (السيرفر يتجاوز التحقق في dev)
-    if (process.env.NODE_ENV === "development") {
-      setCaptchaToken("dev-bypass");
-    }
   }, []);
 
   // ==================== مطر الماتريكس ====================
@@ -169,63 +154,83 @@ export default function LoginPage() {
     return () => window.removeEventListener("resize", handleResize);
   }, []);
 
-  // ==================== فتح البصمة تلقائياً للمستخدمين المفعلين ====================
+  // ==================== تحضير بصمة الدخول المسبق ====================
+  // نجهّز خيارات WebAuthn فوراً عند تغيير البريد (قبل الضغط على زر البصمة)
   useEffect(() => {
-    const autoTriggerWebAuthn = async () => {
-      // نتحقق إذا كان المتصفح يدعم WebAuthn
-      if (!window.PublicKeyCredential) return;
-
-      // نتحقق من وجود بريد إلكتروني مخزّن من جلسة سابقة
-      const storedEmail = localStorage.getItem("userEmail");
-      if (!storedEmail) return; // لا يوجد بريد مخزّن — نتخطى
-
-      try {
-        const startRes = await fetch("/api/auth/webauthn/login/start", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email: storedEmail }),
-        });
-        const startData = await startRes.json();
-        if (!startData.success) return; // لا توجد بصمات مفعلة
-
-        // يوجد بصمة مفعلة - نفتح نافذة البصمة تلقائياً
-        setLoading(true);
-        setError("");
-
-        const authResponse = await startAuthentication({
-          optionsJSON: startData.options,
-        });
-
-        const completeRes = await fetch("/api/auth/webauthn/login/complete", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            userId: startData.userId,
-            authResponse,
-          }),
-        });
-
-        const completeData = await completeRes.json();
-        if (!completeData.success) throw new Error(completeData.message);
-
-        setUser({
-          id: startData.userId || "",
-          email: completeData.email || "",
-          name: completeData.name || "",
-          role: completeData.role,
-          level: completeData.level || "",
-          webAuthnEnabled: true,
-        });
-
-        redirectToDashboard(completeData.role);
-      } catch {
-        // المستخدم لم يفعل البصمة أو فشلت - لا نفعل شيئاً
-      } finally {
-        setLoading(false);
-      }
+    if (!username || username.length < 3) {
+      webAuthnLoginOptRef.current = null;
+      webAuthnLoginUserIdRef.current = null;
+      return;
+    }
+    let cancelled = false;
+    fetch("/api/auth/webauthn/login/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: username }),
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        if (cancelled) return;
+        if (data.success) {
+          webAuthnLoginOptRef.current = data.options;
+          webAuthnLoginUserIdRef.current = data.userId;
+        } else {
+          webAuthnLoginOptRef.current = null;
+          webAuthnLoginUserIdRef.current = null;
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          webAuthnLoginOptRef.current = null;
+          webAuthnLoginUserIdRef.current = null;
+        }
+      });
+    return () => {
+      cancelled = true;
     };
+  }, [username]);
 
-    autoTriggerWebAuthn();
+  // تحضير خيارات التسجيل المسبق للمستخدمين الجدد
+  useEffect(() => {
+    if (!showWebAuthnPrompt) {
+      webAuthnRegOptRef.current = null;
+      return;
+    }
+    fetch("/api/auth/webauthn/register/start", {
+      method: "POST",
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.success) {
+          webAuthnRegOptRef.current = data.options;
+        }
+      })
+      .catch(() => {
+        webAuthnRegOptRef.current = null;
+      });
+  }, [showWebAuthnPrompt]);
+
+  // ==================== تحضير بصمة الدخول التلقائي (لمن عنده جلسة سابقة) ====================
+  useEffect(() => {
+    if (!window.PublicKeyCredential) return;
+
+    const storedEmail = localStorage.getItem("userEmail");
+    if (!storedEmail) return;
+
+    // نجهّز الخيارات للزر فقط (لا نستدعي startAuthentication بدون نقرة)
+    fetch("/api/auth/webauthn/login/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: storedEmail }),
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.success) {
+          webAuthnLoginOptRef.current = data.options;
+          webAuthnLoginUserIdRef.current = data.userId;
+        }
+      })
+      .catch(() => {});
   }, []); // تشتغل مرة واحدة عند فتح الصفحة
 
   // ==================== التوجيه حسب الدور ====================
@@ -248,21 +253,21 @@ export default function LoginPage() {
   };
 
   // ==================== تفعيل البصمة ====================
-  const handleEnableWebAuthn = async () => {
+  const handleEnableWebAuthn = () => {
     if (!pendingUser) return;
+
+    const options = webAuthnRegOptRef.current;
+    if (!options) {
+      setError("فشل تحضير بيانات البصمة، حاول مرة أخرى");
+      return;
+    }
+
     setWebAuthnRegistering(true);
     setError("");
-    try {
-      const startRes = await fetch("/api/auth/webauthn/register/start", {
-        method: "POST",
-      });
-      const startData = await startRes.json();
-      if (!startData.success) throw new Error(startData.message);
+    webAuthnRegOptRef.current = null; // استخدام لمرة واحدة
 
-      const regResponse = await startRegistration({
-        optionsJSON: startData.options,
-      });
-
+    // استدعاء startRegistration بشكل متزامن مع النقرة للحفاظ على user gesture
+    startRegistration({ optionsJSON: options }).then(async (regResponse) => {
       const completeRes = await fetch("/api/auth/webauthn/register/complete", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -277,10 +282,10 @@ export default function LoginPage() {
         setShowWebAuthnPrompt(false);
         redirectToDashboard(localStorage.getItem("userRole") || "");
       }, 1500);
-    } catch (err: any) {
+    }).catch((err: any) => {
       setError(err.message || "فشل تسجيل البصمة");
       setWebAuthnRegistering(false);
-    }
+    });
   };
 
   const handleSkipWebAuthn = () => {
@@ -308,7 +313,6 @@ export default function LoginPage() {
         body: JSON.stringify({
           username,
           password,
-          captchaToken,
           twoFactorToken: loginStep === "twofa" ? twoFACode : undefined,
         }),
       });
@@ -359,7 +363,7 @@ export default function LoginPage() {
         const res = await fetch("/api/auth/forgot-password", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email: forgotEmail, captchaToken }),
+          body: JSON.stringify({ email: forgotEmail }),
         });
         const data = await res.json();
         if (data.success) {
@@ -446,7 +450,6 @@ export default function LoginPage() {
           email: activateEmail,
           password: activatePassword,
           confirmPassword: activateConfirm,
-          captchaToken,
         }),
       });
       const data = await res.json();
@@ -778,74 +781,39 @@ export default function LoginPage() {
                     />
                   )}
 
-                  {/* hCaptcha */}
-                  {loginStep !== "twofa" && (
-                    <div
-                      ref={captchaRef}
-                      style={{
-                        display: "flex",
-                        justifyContent: "center",
-                        marginBottom: "16px",
-                      }}
-                    >
-                      <div
-                        style={{
-                          transform: "scale(0.85)",
-                          transformOrigin: "center",
-                        }}
-                      >
-                        <HCaptcha
-                          sitekey={getSiteKey()}
-                          onVerify={(token: string) => onCaptchaVerify(token)}
-                          onExpire={() => onCaptchaExpire()}
-                          theme="dark"
-                          size="normal"
-                        />
-                      </div>
-                    </div>
-                  )}
-
                   {/* زران متجاوران */}
                   <div style={{ display: "flex", gap: "10px" }}>
                     {/* زر البصمة */}
                     <button
                       type="button"
-                      onClick={async () => {
+                      onClick={() => {
+                        const options = webAuthnLoginOptRef.current;
+                        const userId = webAuthnLoginUserIdRef.current;
+                        if (!options || !userId) {
+                          setError("الرجاء إدخال البريد الإلكتروني أولاً");
+                          return;
+                        }
+
                         setLoading(true);
                         setError("");
-                        try {
-                          const startRes = await fetch(
-                            "/api/auth/webauthn/login/start",
-                            {
-                              method: "POST",
-                              headers: { "Content-Type": "application/json" },
-                              body: JSON.stringify({
-                                email: username || undefined,
-                              }),
-                            },
-                          );
-                          const startData = await startRes.json();
-                          if (!startData.success)
-                            throw new Error(startData.message);
-                          const authResponse = await startAuthentication({
-                            optionsJSON: startData.options,
-                          });
+                        webAuthnLoginOptRef.current = null;
+                        webAuthnLoginUserIdRef.current = null;
+
+                        // استدعاء startAuthentication بشكل متزامن مع النقرة
+                        startAuthentication({ optionsJSON: options }).then(async (authResponse) => {
                           const completeRes = await fetch(
                             "/api/auth/webauthn/login/complete",
                             {
                               method: "POST",
                               headers: { "Content-Type": "application/json" },
-                              body: JSON.stringify({
-                                userId: startData.userId,
-                                authResponse,
-                              }),
+                              body: JSON.stringify({ userId, authResponse }),
                             },
                           );
                           const completeData = await completeRes.json();
                           if (!completeData.success)
                             throw new Error(completeData.message);
                           setUser({
-                            id: startData.userId || "",
+                            id: userId || "",
                             email: completeData.email || "",
                             name: completeData.name || "",
                             role: completeData.role,
@@ -859,11 +827,11 @@ export default function LoginPage() {
                           else if (completeData.role === "TEACHER")
                             router.push("/teacher");
                           else router.push("/student");
-                        } catch (err: any) {
+                        }).catch((err: any) => {
                           setError(err.message || "فشل الدخول بالبصمة");
-                        } finally {
+                        }).finally(() => {
                           setLoading(false);
-                        }
+                        });
                       }}
                       disabled={loading}
                       title="دخول بالبصمة"
@@ -1276,7 +1244,6 @@ export default function LoginPage() {
                             headers: { "Content-Type": "application/json" },
                             body: JSON.stringify({
                               email: forgotEmail,
-                              captchaToken,
                             }),
                           });
                           const data = await res.json();

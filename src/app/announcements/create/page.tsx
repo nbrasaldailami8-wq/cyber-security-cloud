@@ -12,8 +12,6 @@ import Pagination from "@/components/ui/Pagination";
 import { usePagination } from "@/hooks/usePagination";
 import { useAuthStore } from "@/store/authStore";
 import { csrfFetch } from "@/lib/csrfClient";
-import { useSupabaseRealtime } from "@/hooks/useSupabaseRealtime";
-
 // ==================== الأنواع ====================
 interface Announcement {
   id: string;
@@ -99,13 +97,6 @@ export default function CreateAnnouncementPage() {
   const userRole = user?.role || "";
   const userLevel = user?.level || "";
   const userId = user?.id || "";
-
-  useSupabaseRealtime(`user-${userId}`, "notification", (data: any) => {
-    if (data.type === "NEW_ANNOUNCEMENT") {
-      showToast("📢 تعميم جديد", "info");
-      loadHistory();
-    }
-  });
 
   // تبويب: نشر أو سجل
   type Tab = "create" | "history";

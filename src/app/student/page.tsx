@@ -132,11 +132,6 @@ export default function StudentDashboard() {
       showToast(`✅ تم تقييم ${data.subjectName}: ${data.grade}`, "success");
     }
   });
-  useSupabaseRealtime(`user-${userId}`, "notification", () => {
-    loadAssignments();
-    loadGrades();
-  });
-
   // التبويبات
   type Tab = "upload" | "assignments" | "grades";
   const [activeTab, setActiveTab] = useState<Tab>("upload");

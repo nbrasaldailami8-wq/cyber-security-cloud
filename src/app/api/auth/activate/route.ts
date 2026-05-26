@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { hashToken } from "@/lib/security";
-import { verifyCaptcha } from "@/lib/captcha";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
 import { withErrorHandler } from "@/lib/errors";
@@ -12,7 +11,6 @@ const activateSchema = z
     email: z.string().email("بريد إلكتروني غير صالح"),
     password: z.string().min(8, "كلمة المرور يجب أن تكون 8 أحرف على الأقل"),
     confirmPassword: z.string(),
-    captchaToken: z.string().optional(),
   })
   .refine((data) => data.password === data.confirmPassword, {
     message: "كلمتا المرور غير متطابقتين",
@@ -29,18 +27,8 @@ export const POST = withErrorHandler(async function POST(request: NextRequest) {
     );
   }
 
-  const { code, email, password, captchaToken } = validation.data;
+  const { code, email, password } = validation.data;
   const ip = request.headers.get("x-forwarded-for") || "unknown";
-
-  if (captchaToken) {
-    const captchaOk = await verifyCaptcha(captchaToken);
-    if (!captchaOk) {
-      return NextResponse.json(
-        { success: false, message: "التحقق البشري فشل. حاول مرة أخرى." },
-        { status: 400 },
-      );
-    }
-  }
 
   const codeHash = hashToken(code);
 

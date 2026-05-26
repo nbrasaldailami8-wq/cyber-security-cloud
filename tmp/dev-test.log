@@ -1,0 +1,16 @@
+  ▲ Next.js 14.2.35
+  - Local:        http://localhost:3005
+  - Environments: .env
+
+ ✓ Starting...
+> [PWA] PWA support is disabled
+> [PWA] PWA support is disabled
+ ✓ Ready in 9s
+ ○ Compiling /src/middleware ...
+ ✓ Compiled /src/middleware in 708ms (169 modules)
+ ○ Compiling /api/auth/login ...
+ ✓ Compiled /api/auth/login in 1304ms (260 modules)
+ POST /api/auth/login 200 in 3572ms
+ POST /api/auth/login 200 in 635ms
+
+E:\vscod\cyber-security-cloud>

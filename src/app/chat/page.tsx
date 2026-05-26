@@ -8,7 +8,8 @@ import Sidebar from "@/components/layout/Sidebar";
 import PageTransition from "@/components/layout/PageTransition";
 import { useAuthStore } from "@/store/authStore";
 import ChatArea from "@/components/chat/ChatArea";
-import { getSupabase, trackPresence } from "@/lib/supabaseRealtime";
+import { useSupabaseRealtime } from "@/hooks/useSupabaseRealtime";
+import { trackPresence, isAudioAuthorized, trackAudioPlayed, trackAudioSkippedHidden, trackAudioSkippedThrottle, trackAudioSkippedInactiveTab, trackAudioSkippedUnmounted } from "@/lib/supabaseRealtime";
 
 // ==================== الأنواع ====================
 interface ChatUser {
@@ -69,10 +70,26 @@ export default function ChatPage() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [selectedUser, setSelectedUser] = useState<ChatUser | null>(null);
+  const mountedRef = useRef(true);
   const selectedUserRef = useRef(selectedUser);
   useEffect(() => {
     selectedUserRef.current = selectedUser;
   }, [selectedUser]);
+  const messageReloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const conversationReloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastMessageSoundRef = useRef(0);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [typingUser, setTypingUser] = useState<string | null>(null);
+  const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (messageReloadTimerRef.current) clearTimeout(messageReloadTimerRef.current);
+      if (conversationReloadTimerRef.current) clearTimeout(conversationReloadTimerRef.current);
+      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    };
+  }, []);
   const [showMobileChat, setShowMobileChat] = useState(false);
   const [convLoading, setConvLoading] = useState(true);
   const [conversationCursor, setConversationCursor] = useState<string | null>(null);
@@ -145,72 +162,121 @@ export default function ChatPage() {
     loadConversations();
   }, [loadConversations]);
 
-  // ==================== قناة Supabase موحدة ====================
+  // ==================== قناة Supabase مع إعادة اتصال تلقائي ====================
+  const { connectionState } = useSupabaseRealtime(`user-${userId}`, [
+    {
+      event: "new-message",
+      handler: (payload: any) => {
+        const data = payload;
+        const currentSelected = selectedUserRef.current;
+        if (
+          currentSelected &&
+          (data.senderId === currentSelected.id ||
+            data.receiverId === currentSelected.id)
+        ) {
+          // Play sound only for incoming messages from others
+          if (data.senderId !== userId) {
+            if (!mountedRef.current) {
+              trackAudioSkippedUnmounted();
+            } else if (document.visibilityState !== "visible") {
+              trackAudioSkippedHidden();
+            } else if (!isAudioAuthorized()) {
+              trackAudioSkippedInactiveTab();
+            } else {
+              const now = Date.now();
+              if (now - lastMessageSoundRef.current < 1000) {
+                trackAudioSkippedThrottle();
+              } else {
+                lastMessageSoundRef.current = now;
+                try {
+                  if (!audioRef.current) {
+                    audioRef.current = new Audio("/sounds/notification.mp3");
+                  }
+                  audioRef.current.volume = 0.5;
+                  audioRef.current.currentTime = 0;
+                  audioRef.current.play().catch(() => {});
+                } catch {}
+                trackAudioPlayed();
+              }
+            }
+          }
+          if (data.senderId !== userId && data.receiverId === userId) {
+            const targetUserId = currentSelected.id;
+            if (messageReloadTimerRef.current) clearTimeout(messageReloadTimerRef.current);
+            messageReloadTimerRef.current = setTimeout(() => {
+              if (selectedUserRef.current?.id === targetUserId) {
+                loadMessages(targetUserId, null);
+              }
+            }, 300);
+          }
+        } else if (!currentSelected) {
+          if (conversationReloadTimerRef.current) clearTimeout(conversationReloadTimerRef.current);
+          conversationReloadTimerRef.current = setTimeout(() => {
+            if (!selectedUserRef.current) {
+              loadConversations();
+            }
+          }, 300);
+        }
+      },
+    },
+    {
+      event: "message-edited",
+      handler: (payload: any) => {
+        const { messageId, body } = payload;
+        if (!messageId) return;
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === messageId
+              ? { ...msg, body, isEdited: true }
+              : msg
+          )
+        );
+      },
+    },
+    {
+      event: "message-deleted",
+      handler: (payload: any) => {
+        const { messageId } = payload;
+        if (!messageId) return;
+        setMessages((prev) => prev.filter((msg) => msg.id !== messageId));
+      },
+    },
+    {
+      event: "messages-read",
+      handler: (payload: any) => {
+        const data = payload;
+        if (data && data.isRead && selectedUserRef.current) {
+          loadMessages(selectedUserRef.current.id);
+        }
+      },
+    },
+    {
+      event: "typing",
+      handler: (payload: any) => {
+        const data = payload;
+        const currentSelected = selectedUserRef.current;
+        if (data && currentSelected && data.userId === currentSelected.id) {
+          setTypingUser(data.userId);
+          if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+          typingTimeoutRef.current = setTimeout(() => setTypingUser(null), 2000);
+        }
+      },
+    },
+    {
+      event: "typing_stop",
+      handler: (payload: any) => {
+        const data = payload;
+        if (data && data.userId === selectedUserRef.current?.id) {
+          setTypingUser(null);
+          if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+        }
+      },
+    },
+  ]);
+
   useEffect(() => {
     if (!userId) return;
-    let channel: any = null;
-    let isDestroyed = false;
-
-    const setup = async () => {
-      if (isDestroyed) return;
-
-      // الحصول على اسم القناة المُوقّع والتحقق من الصلاحية
-      let signedChannelName = "";
-      try {
-        const authRes = await fetch("/api/realtime/authorize", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ channelUserId: userId }),
-        });
-        const authData = await authRes.json();
-        if (authData.authorized !== true) return;
-        if (!authData.channelName) return;
-        signedChannelName = authData.channelName;
-      } catch {
-        return;
-      }
-      
-      const supabase = getSupabase();
-      trackPresence(userId);
-
-      channel = supabase
-        .channel(signedChannelName)
-        .on("broadcast", { event: "new-message" }, (payload: any) => {
-          const data = payload.payload;
-          const currentSelected = selectedUserRef.current;
-          if (
-            currentSelected &&
-            (data.senderId === currentSelected.id ||
-              data.receiverId === currentSelected.id)
-          ) {
-            // تشغيل صوت الإشعار عند استلام رسالة جديدة
-            try {
-              const audio = new Audio("/sounds/notification.mp3");
-              audio.volume = 0.5;
-              audio.play().catch(() => {});
-            } catch {}
-            if (data.senderId !== userId && data.receiverId === userId) {
-              // رسالة من المستخدم الآخر — نجلبها عبر API (مشفرة)
-              loadMessages(currentSelected.id, null);
-            }
-          } else if (!currentSelected) {
-            loadConversations();
-          }
-        })
-        .subscribe();
-    };
-
-    setup();
-
-    return () => {
-      isDestroyed = true;
-      if (channel) {
-        import("@/lib/supabaseRealtime").then(({ getSupabase }) => {
-          const supabase = getSupabase();
-          supabase.removeChannel(channel).catch(() => {});
-        }).catch(() => {});
-      }
-    };
+    trackPresence(userId);
   }, [userId]);
   // ==================== البحث ====================
   const searchUsers = async () => {
@@ -273,6 +339,10 @@ export default function ChatPage() {
     l
       ? { LEVEL_1: "م1", LEVEL_2: "م2", LEVEL_3: "م3", LEVEL_4: "م4" }[l] || l
       : "";
+  const getConnectionColor = (state: string) =>
+    state === "connected" ? "#2ea043" : state === "reconnecting" ? "#ffca28" : "#f85149";
+  const getConnectionLabel = (state: string) =>
+    state === "connected" ? "متصل" : state === "reconnecting" ? "إعادة اتصال..." : "غير متصل";
 
   const glassStyle: React.CSSProperties = {
     background: "rgba(10, 20, 40, 0.55)",
@@ -341,8 +411,22 @@ export default function ChatPage() {
                   fontSize: "1.1rem",
                   fontWeight: 800,
                   margin: 0,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "8px",
                 }}
               >
+                <span
+                  title={getConnectionLabel(connectionState)}
+                  style={{
+                    width: "8px",
+                    height: "8px",
+                    borderRadius: "50%",
+                    background: getConnectionColor(connectionState),
+                    display: "inline-block",
+                    flexShrink: 0,
+                  }}
+                />
                 💬 المحادثات
               </h3>
               <button
@@ -662,15 +746,18 @@ export default function ChatPage() {
                 loadConversations();
               }}
               onConversationDeleted={loadConversations}
-              onMessagesRead={() => {
-                if (selectedUser) loadMessages(selectedUser.id);
-              }}
-              onNewMessage={(msg) => {
-                setMessages((prev) => [...prev, msg]);
+              onNewMessage={(msg, replaceTempId) => {
+                setMessages((prev) =>
+                  replaceTempId
+                    ? prev.map((m) => (m.id === replaceTempId ? msg : m))
+                    : [...prev, msg],
+                );
               }}
               hasMoreMessages={hasMoreMessages}
               loadingMoreMessages={loadingMoreMessages}
               onLoadMoreMessages={loadMoreMessages}
+              typingUserId={typingUser}
+              connectionState={connectionState}
             />
           </div>
         </div>

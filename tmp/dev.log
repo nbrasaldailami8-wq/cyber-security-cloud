@@ -1,0 +1,21 @@
+ ⨯ Failed to start server
+Error: listen EADDRINUSE: address already in use :::3002
+    at Server.setupListenHandle [as _listen2] (node:net:1948:16)
+    at listenInCluster (node:net:2005:12)
+    at Server.listen (node:net:2110:7)
+    at E:\vscod\cyber-security-cloud\node_modules\next\dist\server\lib\start-server.js:280:16
+    at new Promise (<anonymous>)
+    at startServer (E:\vscod\cyber-security-cloud\node_modules\next\dist\server\lib\start-server.js:191:11)
+    at E:\vscod\cyber-security-cloud\node_modules\next\dist\server\lib\start-server.js:310:52
+    at Span.traceAsyncFn (E:\vscod\cyber-security-cloud\node_modules\next\dist\trace\trace.js:154:26)
+    at process.<anonymous> (E:\vscod\cyber-security-cloud\node_modules\next\dist\server\lib\start-server.js:310:35)
+    at process.emit (node:events:508:28) {
+  code: 'EADDRINUSE',
+  errno: -4091,
+  syscall: 'listen',
+  address: '::',
+  port: 3002
+}
+[?25h
+
+E:\vscod\cyber-security-cloud>

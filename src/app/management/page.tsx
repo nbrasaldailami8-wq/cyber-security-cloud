@@ -9,8 +9,6 @@ import Sidebar from "@/components/layout/Sidebar";
 import { useToast } from "@/components/ui/Toast";
 import PageTransition from "@/components/layout/PageTransition";
 import { useAuthStore } from "@/store/authStore";
-import { useSupabaseRealtime } from "@/hooks/useSupabaseRealtime";
-
 interface ServerStats {
   totalUsers: number;
   activeUsers: number;
@@ -47,10 +45,6 @@ export default function ManagementDashboard() {
   const userLevel = user?.level || "";
   const userId = user?.id || "";
   const managementLevel = (user as any)?.managementLevel || "";
-
-  useSupabaseRealtime(`user-${userId}`, "notification", () => {
-    loadStats();
-  });
 
   const [stats, setStats] = useState<ServerStats>({
     totalUsers: 0,

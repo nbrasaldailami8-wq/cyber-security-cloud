@@ -11,8 +11,6 @@ import PageTransition from "@/components/layout/PageTransition";
 import Pagination from "@/components/ui/Pagination";
 import { usePagination } from "@/hooks/usePagination";
 import { useAuthStore } from "@/store/authStore";
-import { useSupabaseRealtime } from "@/hooks/useSupabaseRealtime";
-
 interface LogItem {
   id: string;
   action: string;
@@ -60,10 +58,6 @@ export default function ManagementAuditLogPage() {
   const user = useAuthStore((s) => s.user);
   const { showToast } = useToast();
   const userId = user?.id || "";
-
-  useSupabaseRealtime(`user-${userId}`, "notification", () => {
-    loadLogs();
-  });
 
   const [logs, setLogs] = useState<LogItem[]>([]);
   const [loading, setLoading] = useState(true);

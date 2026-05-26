@@ -10,8 +10,6 @@ import { useToast } from "@/components/ui/Toast";
 import PageTransition from "@/components/layout/PageTransition";
 import { useAuthStore } from "@/store/authStore";
 import { csrfFetch } from "@/lib/csrfClient";
-import { useSupabaseRealtime } from "@/hooks/useSupabaseRealtime";
-
 interface TeacherSubject {
   id: string;
   name: string;
@@ -94,10 +92,6 @@ export default function TeacherGradesPage() {
   const userName = user?.name || "";
   const userId = user?.id || "";
   const userLevel = user?.level || "";
-
-  useSupabaseRealtime(`user-${userId}`, "notification", () => {
-    loadDistributions();
-  });
 
   const [mySubject, setMySubject] = useState<TeacherSubject | null>(null);
   const [distributions, setDistributions] = useState<DistributionRecord[]>([]);

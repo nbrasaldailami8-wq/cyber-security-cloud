@@ -167,10 +167,6 @@ export default function TeacherDashboard() {
     loadPending();
     loadHistory();
   });
-  useSupabaseRealtime(`user-${userId}`, "notification", () => {
-    loadStudentsCount();
-  });
-
   // التبويبات
   type Tab = "inbox" | "history" | "grades";
   const [activeTab, setActiveTab] = useState<Tab>("inbox");

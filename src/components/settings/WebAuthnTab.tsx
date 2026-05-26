@@ -1,9 +1,17 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { motion } from "framer-motion";
 import { startRegistration } from "@simplewebauthn/browser";
 import { useToast } from "@/components/ui/Toast";
+
+interface Credential {
+  id: string;
+  credentialId: string;
+  deviceName: string | null;
+  createdAt: string;
+  lastUsedAt: string | null;
+}
 
 interface Props {
   webAuthnEnabled: boolean;
@@ -14,23 +22,69 @@ export default function WebAuthnTab({ webAuthnEnabled, onUpdate }: Props) {
   const { showToast } = useToast();
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
-  const [showDisableConfirm, setShowDisableConfirm] = useState(false);
+  const [credentials, setCredentials] = useState<Credential[]>([]);
+  const [credentialsLoading, setCredentialsLoading] = useState(false);
+  const [removingId, setRemovingId] = useState<string | null>(null);
+  const [showRemoveConfirm, setShowRemoveConfirm] = useState<string | null>(null);
   const [showEnableConfirm, setShowEnableConfirm] = useState(false);
+  const registerOptRef = useRef<any>(null);
 
-  const handleEnable = async () => {
+  // تحضير خيارات التسجيل قبل النقرة (للحفاظ على user gesture)
+  useEffect(() => {
+    if (!showEnableConfirm) {
+      registerOptRef.current = null;
+      return;
+    }
+    fetch("/api/auth/webauthn/register/start", {
+      method: "POST",
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.success) {
+          registerOptRef.current = data.options;
+        }
+      })
+      .catch(() => {
+        registerOptRef.current = null;
+      });
+  }, [showEnableConfirm]);
+
+  const fetchCredentials = useCallback(async () => {
+    setCredentialsLoading(true);
+    try {
+      const res = await fetch("/api/auth/webauthn/list");
+      const data = await res.json();
+      if (data.success) {
+        setCredentials(data.credentials);
+      }
+    } catch {
+      // silent
+    } finally {
+      setCredentialsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (webAuthnEnabled) {
+      fetchCredentials();
+    } else {
+      setCredentials([]);
+    }
+  }, [webAuthnEnabled, fetchCredentials]);
+
+  const handleEnable = () => {
+    const options = registerOptRef.current;
+    if (!options) {
+      showToast("فشل تحضير بيانات البصمة، حاول مرة أخرى", "error");
+      return;
+    }
+
     setLoading(true);
     setMessage("");
-    try {
-      const startRes = await fetch("/api/auth/webauthn/register/start", {
-        method: "POST",
-      });
-      const startData = await startRes.json();
-      if (!startData.success) throw new Error(startData.message);
+    registerOptRef.current = null; // استخدام لمرة واحدة
 
-      const regResponse = await startRegistration({
-        optionsJSON: startData.options,
-      });
-
+    // استدعاء startRegistration بشكل متزامن مع النقرة
+    startRegistration({ optionsJSON: options }).then(async (regResponse) => {
       const completeRes = await fetch("/api/auth/webauthn/register/complete", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -41,26 +95,46 @@ export default function WebAuthnTab({ webAuthnEnabled, onUpdate }: Props) {
 
       showToast("✅ تم تفعيل البصمة بنجاح", "success");
       onUpdate();
-    } catch (err: any) {
+    }).catch((err: any) => {
       showToast(err.message || "فشل تفعيل البصمة", "error");
-    } finally {
+    }).finally(() => {
       setLoading(false);
+    });
+  };
+
+  const handleRemoveCredential = async (credentialId: string) => {
+    setShowRemoveConfirm(null);
+    setRemovingId(credentialId);
+    setMessage("");
+    try {
+      const res = await fetch("/api/auth/webauthn/remove", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ credentialId }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        showToast("🗑️ تم إلغاء البصمة بنجاح", "warning");
+        await fetchCredentials();
+        onUpdate();
+      } else {
+        showToast(data.message || "فشل إلغاء البصمة", "error");
+      }
+    } catch {
+      showToast("حدث خطأ في الاتصال", "error");
+    } finally {
+      setRemovingId(null);
     }
   };
 
-  const handleDisable = () => {
-    setShowDisableConfirm(true);
-  };
-
-  const confirmDisable = async () => {
-    setShowDisableConfirm(false);
+  const handleRemoveAll = async () => {
+    setShowRemoveConfirm(null);
     setLoading(true);
-    setMessage("");
     try {
-      const res = await fetch("/api/settings/2fa/disable", {
+      const res = await fetch("/api/auth/webauthn/remove", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type: "webauthn" }),
+        body: JSON.stringify({ revokeAll: true }),
       });
       const data = await res.json();
       if (data.success) {
@@ -74,6 +148,20 @@ export default function WebAuthnTab({ webAuthnEnabled, onUpdate }: Props) {
     } finally {
       setLoading(false);
     }
+  };
+
+  const formatDate = (dateStr: string | null) => {
+    if (!dateStr) return "—";
+    const d = new Date(dateStr);
+    return d.toLocaleDateString("ar-SA", {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    });
+  };
+
+  const getDeviceLabel = (cred: Credential) => {
+    return cred.deviceName || `بصمة ${cred.credentialId.slice(0, 8)}...`;
   };
 
   return (
@@ -187,9 +275,6 @@ export default function WebAuthnTab({ webAuthnEnabled, onUpdate }: Props) {
                 <h3 style={{ color: "#fff", fontSize: "1.2rem", fontWeight: 800, marginBottom: "8px" }}>
                   تفعيل الدخول بالبصمة
                 </h3>
-                <p style={{ color: "#ffca28", fontSize: "0.9rem", marginBottom: "10px", fontWeight: 600 }}>
-                  سيتم تسجيل خروجك من جميع الأجهزة النشطة.
-                </p>
                 <p style={{ color: "#8b949e", fontSize: "0.85rem", marginBottom: "25px" }}>
                   هل أنت متأكد من تفعيل الدخول بالبصمة؟
                 </p>
@@ -222,86 +307,157 @@ export default function WebAuthnTab({ webAuthnEnabled, onUpdate }: Props) {
           )}
           </>
         ) : (
-          <>
-          <motion.button
-            whileHover={{ scale: 1.02 }}
-            whileTap={{ scale: 0.98 }}
-            onClick={handleDisable}
-            disabled={loading}
-            style={{
-              padding: "12px 30px",
-              background: "rgba(248,81,73,0.1)",
-              border: "1px solid rgba(248,81,73,0.3)",
-              color: "#f85149",
-              borderRadius: "10px",
-              fontWeight: 700,
-              fontSize: "0.95rem",
-              cursor: "pointer",
-              fontFamily: "'Cairo', sans-serif",
-              opacity: loading ? 0.7 : 1,
-            }}
-          >
-            {loading ? "⏳ جاري..." : "🔒 إيقاف البصمة"}
-          </motion.button>
+          <div style={{ width: "100%" }}>
+            {/* قائمة البصمات المسجلة */}
+            {credentialsLoading ? (
+              <p style={{ textAlign: "center", color: "#8b949e", fontSize: "0.85rem" }}>
+                ⏳ جاري تحميل البصمات...
+              </p>
+            ) : credentials.length === 0 ? (
+              <p style={{ textAlign: "center", color: "#8b949e", fontSize: "0.85rem" }}>
+                لا توجد بصمات مسجلة حالياً
+              </p>
+            ) : (
+              <div style={{ marginBottom: "16px" }}>
+                <p style={{ color: "#8b949e", fontSize: "0.8rem", marginBottom: "10px", textAlign: "right" }}>
+                  البصمات المسجلة ({credentials.length})
+                </p>
+                {credentials.map((cred) => (
+                  <div
+                    key={cred.id}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      padding: "10px 14px",
+                      marginBottom: "8px",
+                      background: "rgba(255,255,255,0.03)",
+                      border: "1px solid rgba(255,255,255,0.08)",
+                      borderRadius: "12px",
+                    }}
+                  >
+                    <div style={{ textAlign: "right" }}>
+                      <div style={{ color: "#e6edf3", fontSize: "0.9rem", fontWeight: 600 }}>
+                        {getDeviceLabel(cred)}
+                      </div>
+                      <div style={{ color: "#8b949e", fontSize: "0.75rem", marginTop: "2px" }}>
+                        آخر استخدام: {formatDate(cred.lastUsedAt)}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setShowRemoveConfirm(cred.credentialId)}
+                      disabled={removingId === cred.credentialId}
+                      title="إلغاء هذه البصمة"
+                      style={{
+                        padding: "8px 16px",
+                        background: removingId === cred.credentialId
+                          ? "rgba(248,81,73,0.05)"
+                          : "rgba(248,81,73,0.1)",
+                        border: "1px solid rgba(248,81,73,0.3)",
+                        color: removingId === cred.credentialId ? "#8b949e" : "#f85149",
+                        borderRadius: "8px",
+                        fontWeight: 700,
+                        fontSize: "0.8rem",
+                        cursor: removingId === cred.credentialId ? "not-allowed" : "pointer",
+                        fontFamily: "'Cairo', sans-serif",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {removingId === cred.credentialId ? "⏳" : "🗑️ حذف"}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
 
-          {/* نافذة تأكيد إيقاف البصمة */}
-          {showDisableConfirm && (
-            <div
-              style={{
-                position: "fixed", inset: 0, zIndex: 500,
-                display: "flex", alignItems: "center", justifyContent: "center",
-                background: "rgba(0,0,0,0.8)", backdropFilter: "blur(10px)",
-                padding: "20px",
-              }}
-              onClick={() => setShowDisableConfirm(false)}
-            >
-              <div
-                onClick={(e) => e.stopPropagation()}
+            {/* زر إيقاف الكل */}
+            {credentials.length > 1 && (
+              <motion.button
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+                onClick={() => setShowRemoveConfirm("__all__")}
+                disabled={loading}
                 style={{
-                  background: "rgba(10,20,40,0.95)", backdropFilter: "blur(30px)",
-                  border: "1px solid rgba(248,81,73,0.3)", borderRadius: "24px",
-                  padding: "30px", maxWidth: "420px", width: "100%",
-                  textAlign: "center",
+                  padding: "12px 30px",
+                  background: "rgba(248,81,73,0.1)",
+                  border: "1px solid rgba(248,81,73,0.3)",
+                  color: "#f85149",
+                  borderRadius: "10px",
+                  fontWeight: 700,
+                  fontSize: "0.95rem",
+                  cursor: "pointer",
+                  fontFamily: "'Cairo', sans-serif",
+                  opacity: loading ? 0.7 : 1,
+                  width: "100%",
                 }}
               >
-                <div style={{ fontSize: "2.5rem", marginBottom: "15px" }}>⚠️</div>
-                <h3 style={{ color: "#fff", fontSize: "1.2rem", fontWeight: 800, marginBottom: "8px" }}>
-                  إيقاف الدخول بالبصمة
-                </h3>
-                <p style={{ color: "#f85149", fontSize: "0.9rem", marginBottom: "10px", fontWeight: 600 }}>
-                  سيتم تسجيل خروجك من جميع الأجهزة النشطة.
-                </p>
-                <p style={{ color: "#8b949e", fontSize: "0.85rem", marginBottom: "25px" }}>
-                  هل أنت متأكد من إيقاف الدخول بالبصمة؟
-                </p>
-                <div style={{ display: "flex", gap: "10px" }}>
-                  <button
-                    onClick={() => setShowDisableConfirm(false)}
-                    style={{
-                      flex: 1, padding: "13px", borderRadius: "12px",
-                      background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.1)",
-                      color: "#8b949e", cursor: "pointer", fontWeight: 700,
-                      fontFamily: "'Cairo', sans-serif", fontSize: "0.95rem",
-                    }}
-                  >
-                    إلغاء
-                  </button>
-                  <button
-                    onClick={confirmDisable}
-                    style={{
-                      flex: 1.5, padding: "13px", borderRadius: "12px",
-                      background: "linear-gradient(135deg, #f85149, #da3633)", border: "none",
-                      color: "#fff", cursor: "pointer", fontWeight: 800,
-                      fontFamily: "'Cairo', sans-serif", fontSize: "0.95rem",
-                    }}
-                  >
-                    نعم، إيقاف
-                  </button>
+                {loading ? "⏳ جاري..." : "🔒 إيقاف الكل"}
+              </motion.button>
+            )}
+
+            {/* نافذة تأكيد حذف بصمة */}
+            {showRemoveConfirm && (
+              <div
+                style={{
+                  position: "fixed", inset: 0, zIndex: 500,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  background: "rgba(0,0,0,0.8)", backdropFilter: "blur(10px)",
+                  padding: "20px",
+                }}
+                onClick={() => setShowRemoveConfirm(null)}
+              >
+                <div
+                  onClick={(e) => e.stopPropagation()}
+                  style={{
+                    background: "rgba(10,20,40,0.95)", backdropFilter: "blur(30px)",
+                    border: "1px solid rgba(248,81,73,0.3)", borderRadius: "24px",
+                    padding: "30px", maxWidth: "420px", width: "100%",
+                    textAlign: "center",
+                  }}
+                >
+                  <div style={{ fontSize: "2.5rem", marginBottom: "15px" }}>⚠️</div>
+                  <h3 style={{ color: "#fff", fontSize: "1.2rem", fontWeight: 800, marginBottom: "8px" }}>
+                    {showRemoveConfirm === "__all__" ? "إيقاف جميع البصمات" : "حذف البصمة"}
+                  </h3>
+                  <p style={{ color: "#8b949e", fontSize: "0.85rem", marginBottom: "25px" }}>
+                    {showRemoveConfirm === "__all__"
+                      ? "هل أنت متأكد من إيقاف الدخول بالبصمة؟ ستبقى جلسة الدخول الحالية نشطة."
+                      : "هل أنت متأكد من حذف هذه البصمة؟ ستبقى جلسة الدخول الحالية نشطة."}
+                  </p>
+                  <div style={{ display: "flex", gap: "10px" }}>
+                    <button
+                      onClick={() => setShowRemoveConfirm(null)}
+                      style={{
+                        flex: 1, padding: "13px", borderRadius: "12px",
+                        background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.1)",
+                        color: "#8b949e", cursor: "pointer", fontWeight: 700,
+                        fontFamily: "'Cairo', sans-serif", fontSize: "0.95rem",
+                      }}
+                    >
+                      إلغاء
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (showRemoveConfirm === "__all__") {
+                          handleRemoveAll();
+                        } else {
+                          handleRemoveCredential(showRemoveConfirm);
+                        }
+                      }}
+                      style={{
+                        flex: 1.5, padding: "13px", borderRadius: "12px",
+                        background: "linear-gradient(135deg, #f85149, #da3633)", border: "none",
+                        color: "#fff", cursor: "pointer", fontWeight: 800,
+                        fontFamily: "'Cairo', sans-serif", fontSize: "0.95rem",
+                      }}
+                    >
+                      نعم، إيقاف
+                    </button>
+                  </div>
                 </div>
               </div>
-            </div>
-          )}
-          </>
+            )}
+          </div>
         )}
       </div>
     </div>

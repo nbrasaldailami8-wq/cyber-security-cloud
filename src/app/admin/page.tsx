@@ -9,8 +9,6 @@ import Sidebar from "@/components/layout/Sidebar";
 import { useToast } from "@/components/ui/Toast";
 import PageTransition from "@/components/layout/PageTransition";
 import { useAuthStore } from "@/store/authStore";
-import { useSupabaseRealtime } from "@/hooks/useSupabaseRealtime";
-
 // ==================== الأنواع ====================
 interface ServerStats {
   totalUsers: number;
@@ -48,10 +46,6 @@ export default function AdminDashboard() {
 
   const userName = user?.name || "";
   const userId = user?.id || "";
-
-  useSupabaseRealtime(`user-${userId}`, "notification", () => {
-    loadStats();
-  });
 
   const [stats, setStats] = useState<ServerStats>({
     totalUsers: 0,

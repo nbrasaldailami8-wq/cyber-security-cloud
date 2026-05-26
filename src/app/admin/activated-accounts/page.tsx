@@ -11,7 +11,6 @@ import PageTransition from "@/components/layout/PageTransition";
 import Pagination from "@/components/ui/Pagination";
 import { usePagination } from "@/hooks/usePagination";
 import { useAuthStore } from "@/store/authStore";
-import { useSupabaseRealtime } from "@/hooks/useSupabaseRealtime";
 import { csrfFetch } from "@/lib/csrfClient";
 
 // ==================== الأنواع ====================
@@ -81,11 +80,6 @@ export default function ActivatedAccountsPage() {
   const userRole = user?.role || "";
   const userLevel = user?.level || "";
   const userId = user?.id || "";
-
-  useSupabaseRealtime(`user-${userId}`, "notification", () => {
-    loadGenerationLog();
-    loadActivatedUsers();
-  });
 
   // التبويبات
   type ViewTab = "users" | "subjects";
@@ -183,7 +177,7 @@ export default function ActivatedAccountsPage() {
           email: activateEmail.trim(),
           password: activatePassword,
           confirmPassword: activateConfirm,
-          captchaToken: "admin-bypass",
+
         }),
       });
       const data = await res.json();

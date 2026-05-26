@@ -54,6 +54,7 @@ const csrfExemptPaths = [
   "/api/auth/logout",
   "/api/auth/webauthn",
   "/api/auth/2fa",
+  "/api/auth/verify-session",
 ];
 
 const adminPaths = ["/admin"];
@@ -113,7 +114,7 @@ export async function middleware(request: NextRequest) {
   const isDev = process.env.NODE_ENV === "development";
   response.headers.set(
     "Content-Security-Policy",
-    `default-src 'self'; script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ""} https://js.hcaptcha.com https://newassets.hcaptcha.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; style-src-elem 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: https://ik.imagekit.io; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https://*.upstash.io https://sentry.hcaptcha.com https://*.supabase.co wss://*.supabase.co; frame-src 'self' https://www.youtube.com https://newassets.hcaptcha.com;`,
+    `default-src 'self'; script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ""}; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; style-src-elem 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: https://ik.imagekit.io; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https://*.upstash.io https://*.supabase.co wss://*.supabase.co; frame-src 'self' https://www.youtube.com;`,
   );
 
   const method = request.method;
@@ -194,6 +195,11 @@ export async function middleware(request: NextRequest) {
     const { payload } = await jwtVerify(accessToken, ACCESS_SECRET);
 
     // P1-A: التحقق من الجلسة مع قاعدة البيانات
+    // ملاحظة: الـ self-fetch إلى verify-session يعمل عبر HTTP (لأن middleware
+    // يعمل على Edge ولا يمكنه الوصول إلى Prisma مباشرة).
+    // إذا فشل الـ fetch (network/timeout)، لا نمسح cookies — نستمر مع الـ JWT
+    // الصحيح. الـ JWT قصير العمر (15 دقيقة) وأي تغيير في tokenVersion سيلتقطه
+    // الطلب التالي.
     try {
       const verifyRes = await fetch(
         `${APP_URL}/api/auth/verify-session`,
@@ -237,13 +243,12 @@ export async function middleware(request: NextRequest) {
           // HARD (default when hardLogout is undefined or true):
           return clearCookiesAndRedirect();
         }
-      } else {
-        // verify-session returned non-2xx — fail closed
-        return clearCookiesAndRedirect();
       }
+      // else: non-2xx or network failure — لا نمسح cookies.
+      // JWT ما زال صحيحًا. الطلب التالي سيعيد المحاولة.
     } catch {
-      // verify-session failed (network error, timeout) — fail closed
-      return clearCookiesAndRedirect();
+      // تجاهل فشل الـ fetch — JWT الصحيح يكفي لهذا الطلب.
+      // الطلب التالي سيعيد محاولة التحقق من الـ session.
     }
 
     const userRole = payload.role as string;

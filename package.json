@@ -12,7 +12,6 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@hcaptcha/react-hcaptcha": "^2.0.2",
     "@imagekit/nodejs": "^7.5.0",
     "@logtail/node": "^0.5.8",
     "@logtail/winston": "^0.5.8",

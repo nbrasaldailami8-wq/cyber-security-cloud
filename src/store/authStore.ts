@@ -30,6 +30,7 @@ export const useAuthStore = create<AuthState>((set) => ({
     localStorage.setItem("userName", user.name);
     localStorage.setItem("userEmail", user.email);
     localStorage.setItem("userId", user.id);
+    localStorage.setItem("webAuthnEnabled", String(user.webAuthnEnabled));
     if ((user as any).managementLevel) {
       localStorage.setItem("managementLevel", (user as any).managementLevel);
     }
@@ -43,6 +44,7 @@ export const useAuthStore = create<AuthState>((set) => ({
     localStorage.removeItem("userEmail");
     localStorage.removeItem("userId");
     localStorage.removeItem("managementLevel");
+    localStorage.removeItem("webAuthnEnabled");
     set({ user: null, isAuthenticated: false, isLoading: false });
   },
 
@@ -56,7 +58,7 @@ export const useAuthStore = create<AuthState>((set) => ({
         name: localStorage.getItem("userName") || "",
         role,
         level: localStorage.getItem("userLevel") || "",
-        webAuthnEnabled: false,
+        webAuthnEnabled: localStorage.getItem("webAuthnEnabled") === "true",
         managementLevel: localStorage.getItem("managementLevel") || null,
       };
     })();

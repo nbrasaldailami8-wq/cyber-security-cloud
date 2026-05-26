@@ -21,22 +21,34 @@ interface NotificationState {
   fetchNotifications: () => Promise<void>;
 }
 
-export const useNotificationStore = create<NotificationState>((set, get) => ({
+export const useNotificationStore = create<NotificationState>((set) => ({
   notifications: [],
   unreadCount: 0,
   isLoading: false,
 
   setNotifications: (notifications) =>
-    set({
-      notifications,
-      unreadCount: notifications.filter((n) => !n.isRead).length,
+    set((state) => {
+      const newUnread = notifications.filter((n) => !n.isRead).length;
+      if (
+        state.notifications.length === notifications.length &&
+        state.unreadCount === newUnread &&
+        (notifications.length === 0 || state.notifications[0]?.id === notifications[0]?.id)
+      ) {
+        return state;
+      }
+      return { notifications, unreadCount: newUnread };
     }),
 
   addNotification: (notification) =>
-    set((state) => ({
-      notifications: [notification, ...state.notifications],
-      unreadCount: state.unreadCount + 1,
-    })),
+    set((state) => {
+      if (state.notifications.some((n) => n.id === notification.id)) {
+        return state;
+      }
+      return {
+        notifications: [notification, ...state.notifications],
+        unreadCount: state.unreadCount + 1,
+      };
+    }),
 
   markAsRead: (id) =>
     set((state) => ({

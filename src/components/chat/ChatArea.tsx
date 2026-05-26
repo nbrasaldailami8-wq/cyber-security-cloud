@@ -4,7 +4,6 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useToast } from "@/components/ui/Toast";
 import { csrfFetch } from "@/lib/csrfClient";
-import { useSupabaseRealtime } from "@/hooks/useSupabaseRealtime";
 import { getOnlineUsers } from "@/lib/supabaseRealtime";
 import { getUserChannelName } from "@/lib/realtimeChannels";
 
@@ -102,11 +101,12 @@ interface ChatAreaProps {
   onClose: () => void;
   onMessageSent: () => void;
   onConversationDeleted: () => void;
-  onMessagesRead?: () => void;
-  onNewMessage?: (msg: Message) => void;
+  onNewMessage?: (msg: Message, replaceTempId?: string) => void;
+  typingUserId?: string | null;
   hasMoreMessages?: boolean;
   loadingMoreMessages?: boolean;
   onLoadMoreMessages?: () => void;
+  connectionState?: string;
 }
 
 export default function ChatArea({
@@ -116,16 +116,16 @@ export default function ChatArea({
   onClose,
   onMessageSent,
   onConversationDeleted,
-  onMessagesRead,
   onNewMessage,
+  typingUserId,
   hasMoreMessages,
   loadingMoreMessages,
   onLoadMoreMessages,
+  connectionState,
 }: ChatAreaProps) {
   const { showToast } = useToast();
   const [newMessage, setNewMessage] = useState("");
   const [loading, setLoading] = useState(false);
-  const [typingUser, setTypingUser] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [sendingMsgId, setSendingMsgId] = useState<string | null>(null);
   const [failedMsgId, setFailedMsgId] = useState<string | null>(null);
@@ -140,10 +140,26 @@ export default function ChatArea({
     messageId?: string;
   }>({ show: false, title: "", message: "", action: "" });
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const typingEmitRef = useRef<NodeJS.Timeout | null>(null);
   const typingStopRef = useRef<NodeJS.Timeout | null>(null);
   const [onlineUsers, setOnlineUsers] = useState<Set<string>>(new Set());
+
+  const onNewMessageRef = useRef(onNewMessage);
+  useEffect(() => { onNewMessageRef.current = onNewMessage; });
+  const userIdRef = useRef(userId);
+  useEffect(() => { userIdRef.current = userId; });
+
+  const retryQueueRef = useRef<
+    Array<{
+      tempId: string;
+      body: string;
+      receiverId: string;
+      replyToId?: string;
+      idempotencyKey: string;
+      retryCount: number;
+    }>
+  >([]);
+  const MAX_RETRIES = 3;
 
   // تتبع المستخدمين المتصلين عبر Presence
   useEffect(() => {
@@ -158,7 +174,9 @@ export default function ChatArea({
   // تفعيل الصوت (يحتاج تفاعل مستخدم مرة واحدة)
   useEffect(() => {
     const unlockAudio = () => {
-      const audio = new Audio("/sounds/notification.mp3");
+      const audio = new Audio();
+      audio.src = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=";
+      audio.preload = "none";
       audio.volume = 0;
       audio
         .play()
@@ -183,7 +201,6 @@ export default function ChatArea({
   // تنظيف typingTimeouts عند unmount
   useEffect(() => {
     return () => {
-      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
       if (typingEmitRef.current) clearTimeout(typingEmitRef.current);
       if (typingStopRef.current) clearTimeout(typingStopRef.current);
     };
@@ -220,47 +237,6 @@ export default function ChatArea({
       }
     }, 5000);
   }, [selectedUser, userId]);
-  // قناة موحدة لجميع الأحداث
-  useSupabaseRealtime(`user-${userId}`, [
-    {
-      event: "messages-read",
-      handler: (payload: any) => {
-        const data = payload;
-        if (data && data.isRead && onMessagesRead) {
-          onMessagesRead();
-        }
-      },
-    },
-    {
-      event: "typing",
-      handler: (payload: any) => {
-        const data = payload;
-        if (data && selectedUser && data.userId === selectedUser.id) {
-          setTypingUser(data.userId);
-          if (typingTimeoutRef.current) {
-            clearTimeout(typingTimeoutRef.current);
-          }
-          typingTimeoutRef.current = setTimeout(
-            () => setTypingUser(null),
-            2000,
-          );
-        }
-      },
-    },
-    {
-      event: "typing_stop",
-      handler: (payload: any) => {
-        const data = payload;
-        if (data && data.userId === selectedUser?.id) {
-          setTypingUser(null);
-          if (typingTimeoutRef.current) {
-            clearTimeout(typingTimeoutRef.current);
-          }
-        }
-      },
-    },
-  ]);
-
   // ==================== إرسال ====================
   const sendMessage = async () => {
     if (!newMessage.trim() || !selectedUser) return;
@@ -300,6 +276,8 @@ export default function ChatArea({
     setSendingMsgId(tempId);
     setLoading(true);
 
+    const idempotencyKey = crypto.randomUUID();
+
     try {
       const res = await csrfFetch("/api/chat/send", {
         method: "POST",
@@ -308,22 +286,103 @@ export default function ChatArea({
           receiverId: selectedUser.id,
           body: messageToSend,
           replyToId: replyTo?.id || undefined,
+          idempotencyKey,
         }),
       });
       const data = await res.json();
       if (data.success) {
         setSendingMsgId(null);
-        // لا نعيد تحميل الرسائل - optimistic update يكفي
+        // استبدال الرسالة المؤقتة (temp) بالرسالة الحقيقية من السيرفر
+        if (data.data && onNewMessage) {
+          const serverMsg = data.data as any;
+          const replacement: Message = {
+            ...optimisticMsg,
+            id: serverMsg.id,
+            createdAt: serverMsg.createdAt,
+            isRead: serverMsg.isRead ?? false,
+            isEdited: serverMsg.isEdited ?? false,
+          };
+          onNewMessage(replacement, tempId);
+        }
       } else {
         throw new Error(data.message);
       }
     } catch {
       setSendingMsgId(null);
       setFailedMsgId(tempId);
+      retryQueueRef.current.push({
+        tempId,
+        body: messageToSend,
+        receiverId: selectedUser.id,
+        replyToId: replyTo?.id,
+        idempotencyKey,
+        retryCount: 0,
+      });
     } finally {
       setLoading(false);
     }
   };
+
+  // ==================== إعادة المحاولة (Retry Queue) ====================
+  const processRetryQueue = useCallback(async () => {
+    const queue = retryQueueRef.current;
+    if (queue.length === 0) return;
+    const entries = [...queue];
+    for (const entry of entries) {
+      if (entry.retryCount >= MAX_RETRIES) continue;
+      entry.retryCount++;
+      setSendingMsgId(entry.tempId);
+      try {
+        const res = await csrfFetch("/api/chat/send", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            receiverId: entry.receiverId,
+            body: entry.body,
+            replyToId: entry.replyToId,
+            idempotencyKey: entry.idempotencyKey,
+          }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          retryQueueRef.current = retryQueueRef.current.filter(
+            (e) => e.tempId !== entry.tempId
+          );
+          setFailedMsgId((prev) => (prev === entry.tempId ? null : prev));
+          // استبدال الرسالة المؤقتة بالرسالة الحقيقية بعد نجاح إعادة المحاولة
+          if (data.data && onNewMessageRef.current) {
+            const serverMsg = data.data as any;
+            const replacement: Message = {
+              id: serverMsg.id,
+              senderId: userIdRef.current,
+              receiverId: entry.receiverId,
+              body: entry.body,
+              isRead: false,
+              isEdited: false,
+              createdAt: serverMsg.createdAt,
+              sender: { id: userIdRef.current, name: "أنت" },
+            };
+            onNewMessageRef.current(replacement, entry.tempId);
+          }
+        } else {
+          throw new Error(data.message);
+        }
+      } catch {
+        setFailedMsgId(entry.tempId);
+      } finally {
+        setSendingMsgId((prev) => (prev === entry.tempId ? null : prev));
+      }
+      if (entries.length > 1) {
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    if (connectionState === "connected") {
+      processRetryQueue();
+    }
+  }, [connectionState, processRetryQueue]);
 
   // ==================== تعديل ====================
   const handleEditMessage = async () => {
@@ -606,7 +665,7 @@ export default function ChatArea({
                 margin: "2px 0 0",
               }}
             >
-              {typingUser === selectedUser?.id
+              {typingUserId === selectedUser?.id
                 ? "✍️ يكتب الآن..."
                 : lastSeenText(selectedUser)}
             </p>

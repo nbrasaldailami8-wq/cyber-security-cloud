@@ -189,6 +189,15 @@ export class MessageService {
       where: { id: messageId },
       data: { body: encryptedBody, isEdited: true },
     });
+
+    try {
+      const { broadcastEvent } = await import("@/lib/supabaseRealtime");
+      const senderChan = getUserChannelName(message.senderId);
+      const receiverChan = getUserChannelName(message.receiverId);
+      const payload = { messageId, body: sanitized, updatedAt: new Date().toISOString() };
+      broadcastEvent(senderChan, "message-edited", payload);
+      if (receiverChan !== senderChan) broadcastEvent(receiverChan, "message-edited", payload);
+    } catch { /* صامت */ }
   }
 
   static async deleteMessage(
@@ -212,6 +221,13 @@ export class MessageService {
           where: { id: messageId },
           data: { deletedAt: new Date() },
         });
+        try {
+          const { broadcastEvent } = await import("@/lib/supabaseRealtime");
+          const senderChan = getUserChannelName(message.senderId);
+          const receiverChan = getUserChannelName(message.receiverId);
+          broadcastEvent(senderChan, "message-deleted", { messageId });
+          if (receiverChan !== senderChan) broadcastEvent(receiverChan, "message-deleted", { messageId });
+        } catch { /* صامت */ }
         return;
       }
 
@@ -220,11 +236,19 @@ export class MessageService {
           where: { id: messageId },
           data: { senderDeleted: true },
         });
+        try {
+          const { broadcastEvent } = await import("@/lib/supabaseRealtime");
+          broadcastEvent(getUserChannelName(message.senderId), "message-deleted", { messageId });
+        } catch { /* صامت */ }
       } else if (message.receiverId === userId) {
         await prisma.message.update({
           where: { id: messageId },
           data: { receiverDeleted: true },
         });
+        try {
+          const { broadcastEvent } = await import("@/lib/supabaseRealtime");
+          broadcastEvent(getUserChannelName(message.receiverId), "message-deleted", { messageId });
+        } catch { /* صامت */ }
       } else {
         throw new ForbiddenError("غير مصرح");
       }

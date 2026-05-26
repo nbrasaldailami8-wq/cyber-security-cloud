@@ -3,7 +3,6 @@ import { prisma } from "@/lib/prisma";
 import { sendEmail, generateResetPasswordEmail } from "@/lib/email";
 import { passwordResetRateLimiter } from "@/lib/ratelimit";
 import { createResetToken, revokeUserTokens } from "@/lib/passwordReset";
-import { verifyCaptcha } from "@/lib/captcha";
 import { z } from "zod";
 import { withErrorHandler } from "@/lib/errors";
 
@@ -12,7 +11,6 @@ const MIN_REQUEST_DURATION_MS = 1500;
 
 const forgotSchema = z.object({
   email: z.string().email("بريد إلكتروني غير صالح"),
-  captchaToken: z.string().min(1, "التحقق البشري مطلوب"),
 });
 
 export const POST = withErrorHandler(async function POST(request: NextRequest) {
@@ -25,7 +23,7 @@ export const POST = withErrorHandler(async function POST(request: NextRequest) {
     );
   }
 
-  const { email: rawEmail, captchaToken } = validation.data;
+  const { email: rawEmail } = validation.data;
   const email = rawEmail.trim().toLowerCase();
   const ip = request.headers.get("x-forwarded-for") || "unknown";
   const startTime = Date.now();
@@ -35,14 +33,6 @@ export const POST = withErrorHandler(async function POST(request: NextRequest) {
     return NextResponse.json(
       { success: false, message: "طلبات كثيرة. حاول مرة أخرى بعد ساعة." },
       { status: 429 },
-    );
-  }
-
-  const captchaOk = await verifyCaptcha(captchaToken);
-  if (!captchaOk) {
-    return NextResponse.json(
-      { success: false, message: "التحقق البشري فشل. حاول مرة أخرى." },
-      { status: 400 },
     );
   }
 

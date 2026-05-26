@@ -125,7 +125,33 @@ function hashPresenceKey(userId: string): string {
 
 const MAX_PRESENCE_LISTENERS = 1000;
 const LISTENER_MONITOR_INTERVAL = 600_000; // 10 دقائق
-const HEARTBEAT_INTERVAL = 3000; // 3 ثوانٍ
+const HEARTBEAT_INTERVAL = 10000; // 10 ثوانٍ (optimized for free plan)
+
+// Tracking / guard refs for presence hardening
+let lastSuccessfulTrackAt = 0;
+let failedHeartbeatCount = 0;
+let isTrackingPresence = false;
+let heartbeatCount = 0;
+let reconnectRetrackCount = 0;
+let visibilityRecoveryCount = 0;
+let visibilityDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+let listenerMonitorInterval: ReturnType<typeof setInterval> | null = null;
+
+// Audio diagnostic counters
+let audioPlayed = 0;
+let audioSkippedHidden = 0;
+let audioSkippedThrottle = 0;
+let audioSkippedInactiveTab = 0;
+let audioSkippedUnmounted = 0;
+let audioDuplicatePrevented = 0;
+
+// Audio diagnostic incrementers (DEV ONLY)
+export function trackAudioPlayed() { if (process.env.NODE_ENV === "development") audioPlayed++; }
+export function trackAudioSkippedHidden() { if (process.env.NODE_ENV === "development") audioSkippedHidden++; }
+export function trackAudioSkippedThrottle() { if (process.env.NODE_ENV === "development") audioSkippedThrottle++; }
+export function trackAudioSkippedInactiveTab() { if (process.env.NODE_ENV === "development") audioSkippedInactiveTab++; }
+export function trackAudioSkippedUnmounted() { if (process.env.NODE_ENV === "development") audioSkippedUnmounted++; }
+export function trackAudioDuplicatePrevented() { if (process.env.NODE_ENV === "development") audioDuplicatePrevented++; }
 
 // تحميل اسم قناة presence من السيرفر
 let resolvedPresenceChannelName: string | null = null;
@@ -210,7 +236,24 @@ function claimActive(userId: string) {
 
   clearInterval(heartbeatInterval);
   heartbeatInterval = setInterval(() => {
+    if (document.visibilityState !== "visible") return;
+    heartbeatCount++;
     broadcastChannel?.postMessage({ type: "presence", action: "HEARTBEAT", tabId });
+    const elapsed = Date.now() - lastSuccessfulTrackAt;
+    if (elapsed > HEARTBEAT_INTERVAL * 3) {
+      failedHeartbeatCount++;
+      if (failedHeartbeatCount >= 3) {
+        failedHeartbeatCount = 0;
+        reconnectRetrackCount++;
+        if (presenceChannel) {
+          presenceChannel.track({ userId, online_at: new Date().toISOString() })
+            .then(() => { lastSuccessfulTrackAt = Date.now(); })
+            .catch(() => {});
+        }
+      }
+    } else {
+      failedHeartbeatCount = 0;
+    }
   }, HEARTBEAT_INTERVAL);
 
   initPresenceChannel(userId);
@@ -220,11 +263,19 @@ function goToStandby() {
   isActiveTab = false;
 
   clearInterval(heartbeatInterval);
+  if (visibilityDebounceTimer) {
+    clearTimeout(visibilityDebounceTimer);
+    visibilityDebounceTimer = null;
+  }
 
   if (presenceChannel) {
     presenceChannel.unsubscribe();
     presenceChannel = null;
   }
+
+  lastSuccessfulTrackAt = 0;
+  failedHeartbeatCount = 0;
+  isTrackingPresence = false;
 }
 
 async function initPresenceChannel(userId: string) {
@@ -250,13 +301,14 @@ async function initPresenceChannel(userId: string) {
           userId,
           online_at: new Date().toISOString(),
         });
+        lastSuccessfulTrackAt = Date.now();
       }
     });
 }
 
 // مراقبة الذاكرة: تسجيل عدد المستمعين كل 10 دقائق
 if (typeof window !== "undefined") {
-  setInterval(() => {
+  listenerMonitorInterval = setInterval(() => {
     const count = presenceListeners.size;
     if (count > 500) {
       console.warn(
@@ -267,8 +319,9 @@ if (typeof window !== "undefined") {
 }
 
 export function trackPresence(userId: string): void {
+  if (isTrackingPresence) return;
+  isTrackingPresence = true;
   try {
-    // إذا كان الاتصال موجودًا بالفعل وكان هذا هو التبويب النشط، حدّث الحالة
     if (presenceChannel && isActiveTab) {
       presenceUserId = userId;
       presenceChannel
@@ -276,16 +329,15 @@ export function trackPresence(userId: string): void {
           userId,
           online_at: new Date().toISOString(),
         })
+        .then(() => { lastSuccessfulTrackAt = Date.now(); })
         .catch(() => {});
       return;
     }
 
-    // إذا كان الاتصال موجودًا لكننا لسنا التبويب النشط، لا تفعل شيئًا
     if (presenceChannel && !isActiveTab) {
       return;
     }
 
-    // أول مرة أو بعد العودة من الخمول
     if (!broadcastChannel) {
       setupMultiTabCoordination(userId);
     } else if (!isActiveTab) {
@@ -295,16 +347,29 @@ export function trackPresence(userId: string): void {
     }
   } catch (error) {
     console.error("[Presence] trackPresence error:", error);
+  } finally {
+    isTrackingPresence = false;
   }
 }
 
-// عند عودة المستخدم للتبويب، نعلن النشاط
-if (typeof document !== "undefined") {
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible" && presenceUserId && !isActiveTab) {
-      claimActive(presenceUserId);
+// Visibility change handling with debounce
+function onVisibilityChange() {
+  if (visibilityDebounceTimer) clearTimeout(visibilityDebounceTimer);
+  visibilityDebounceTimer = setTimeout(() => {
+    visibilityDebounceTimer = null;
+    if (document.visibilityState === "visible" && presenceUserId) {
+      visibilityRecoveryCount++;
+      if (!isActiveTab) {
+        claimActive(presenceUserId);
+      } else {
+        trackPresence(presenceUserId);
+      }
     }
-  });
+  }, 500);
+}
+
+if (typeof document !== "undefined") {
+  document.addEventListener("visibilitychange", onVisibilityChange);
 }
 
 export function subscribePresence(
@@ -344,6 +409,76 @@ export function isUserOnline(userId: string): boolean {
   }
 }
 
+/** Returns true if this tab is authorized to play audio (visible + active tab) */
+export function isAudioAuthorized(): boolean {
+  return typeof document !== "undefined" && document.visibilityState === "visible" && isActiveTab;
+}
+
+/** Full cleanup — removes all presence artifacts (call on logout/unmount) */
+export function cleanupPresence(): void {
+  clearInterval(heartbeatInterval);
+  if (visibilityDebounceTimer) {
+    clearTimeout(visibilityDebounceTimer);
+    visibilityDebounceTimer = null;
+  }
+  if (listenerMonitorInterval) {
+    clearInterval(listenerMonitorInterval);
+    listenerMonitorInterval = null;
+  }
+  if (presenceChannel) {
+    presenceChannel.unsubscribe();
+    presenceChannel = null;
+  }
+  if (broadcastChannel) {
+    broadcastChannel.onmessage = null;
+    broadcastChannel.close();
+    broadcastChannel = null;
+  }
+  if (typeof document !== "undefined") {
+    document.removeEventListener("visibilitychange", onVisibilityChange);
+  }
+  presenceUserId = "";
+  isActiveTab = false;
+  lastSuccessfulTrackAt = 0;
+  failedHeartbeatCount = 0;
+  isTrackingPresence = false;
+  heartbeatCount = 0;
+  reconnectRetrackCount = 0;
+  visibilityRecoveryCount = 0;
+  audioPlayed = 0;
+  audioSkippedHidden = 0;
+  audioSkippedThrottle = 0;
+  audioSkippedInactiveTab = 0;
+  audioSkippedUnmounted = 0;
+  audioDuplicatePrevented = 0;
+}
+
+// Presence debug (dev only)
+if (typeof window !== "undefined" && process.env.NODE_ENV === "development") {
+  const dbg = (window as any).__REALTIME_DEBUG;
+  if (dbg) {
+    dbg.audio = () => ({
+      played: audioPlayed,
+      skippedHidden: audioSkippedHidden,
+      skippedThrottle: audioSkippedThrottle,
+      skippedInactiveTab: audioSkippedInactiveTab,
+      skippedUnmounted: audioSkippedUnmounted,
+      duplicatePrevented: audioDuplicatePrevented,
+    });
+    dbg.presence = () => ({
+      activeTab: isActiveTab,
+      tabId,
+      heartbeatCount,
+      failedHeartbeatCount,
+      lastSuccessfulTrackAt: lastSuccessfulTrackAt || null,
+      isTrackingPresence,
+      reconnectRetrackCount,
+      visibilityRecoveryCount,
+      heartbeatIntervalMs: HEARTBEAT_INTERVAL,
+    });
+  }
+}
+
 const supabaseRealtime = {
   getSupabase,
   broadcastEvent,
@@ -351,6 +486,7 @@ const supabaseRealtime = {
   subscribePresence,
   getOnlineUsers,
   isUserOnline,
+  cleanupPresence,
 };
 
 export default supabaseRealtime;
