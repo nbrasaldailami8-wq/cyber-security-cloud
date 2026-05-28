@@ -6,6 +6,7 @@ import { useToast } from "@/components/ui/Toast";
 import { csrfFetch } from "@/lib/csrfClient";
 import { getOnlineUsers } from "@/lib/supabaseRealtime";
 import { getUserChannelName } from "@/lib/realtimeChannels";
+import { traceOptimistic, traceLifecycle, traceAudio, traceRenderSkip, traceMessageLifecycle } from "@/lib/realtimeDiagnostics";
 
 // ==================== الأنواع ====================
 interface ChatUser {
@@ -183,21 +184,55 @@ export default function ChatArea({
         .then(() => {
           audio.pause();
           audio.currentTime = 0;
+          traceAudio("AUDIO_UNLOCK_SUCCESS", "USER_INTERACTION", {});
         })
-        .catch(() => {});
+        .catch(() => {
+          traceAudio("AUDIO_UNLOCK_REJECTED", "USER_INTERACTION", {});
+        });
       document.removeEventListener("click", unlockAudio);
       document.removeEventListener("keydown", unlockAudio);
     };
     document.addEventListener("click", unlockAudio);
     document.addEventListener("keydown", unlockAudio);
+    traceLifecycle("ChatArea", "MOUNT", { userId });
     return () => {
       document.removeEventListener("click", unlockAudio);
       document.removeEventListener("keydown", unlockAudio);
+      traceLifecycle("ChatArea", "UNMOUNT", { userId });
     };
-  }, []);
+  }, [userId]);
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // FORENSIC: Detect messages in state but not rendered
+  useEffect(() => {
+    if (process.env.NODE_ENV !== "development") return;
+    if (!selectedUser) return;
+    const totalInState = messages.length;
+    const renderedIds: string[] = [];
+    const skippedIds: string[] = [];
+    for (const msg of messages) {
+      if (!searchTerm || msg.body.includes(searchTerm)) {
+        renderedIds.push(msg.id);
+        traceMessageLifecycle("MESSAGE_RENDERED", msg.id, { searchTerm: searchTerm || null, selectedUserId: selectedUser.id });
+      } else {
+        skippedIds.push(msg.id);
+        traceMessageLifecycle("MESSAGE_NOT_RENDERED", msg.id, { reason: "SEARCH_FILTER", searchTerm, selectedUserId: selectedUser.id });
+      }
+    }
+    if (skippedIds.length > 0) {
+      traceRenderSkip(totalInState, renderedIds.length, skippedIds, "SEARCH_FILTER", { searchTerm, selectedUserId: selectedUser.id });
+    }
+    // Detect message in state but not rendered (no search filter)
+    if (renderedIds.length < totalInState && !searchTerm) {
+      const missingIds = messages.filter(m => !renderedIds.includes(m.id)).map(m => m.id);
+      traceRenderSkip(totalInState, renderedIds.length, missingIds, "UNKNOWN_SKIP", { selectedUserId: selectedUser.id });
+      for (const missingId of missingIds) {
+        traceMessageLifecycle("MESSAGE_VISIBILITY_REJECTED", missingId, { reason: "UNKNOWN_SKIP", selectedUserId: selectedUser.id });
+      }
+    }
+  }, [messages, searchTerm, selectedUser]);
   // تنظيف typingTimeouts عند unmount
   useEffect(() => {
     return () => {
@@ -268,6 +303,7 @@ export default function ChatArea({
     if (onNewMessage) {
       onNewMessage(optimisticMsg);
     }
+    traceOptimistic("TEMP_CREATED", tempId, { body: messageToSend.slice(0, 50), receiverId: selectedUser.id, replyToId: replyTo?.id || null });
     // منع التكرار: نخزن الـ tempId عشان realtime ما يضيفه مرة ثانية
     const tempIdRef = tempId;
 
@@ -302,6 +338,7 @@ export default function ChatArea({
             isRead: serverMsg.isRead ?? false,
             isEdited: serverMsg.isEdited ?? false,
           };
+          traceOptimistic("TEMP_REPLACED", tempId, { serverId: serverMsg.id, body: messageToSend.slice(0, 50), receiverId: selectedUser.id });
           onNewMessage(replacement, tempId);
         }
       } else {
@@ -362,6 +399,7 @@ export default function ChatArea({
               createdAt: serverMsg.createdAt,
               sender: { id: userIdRef.current, name: "أنت" },
             };
+            traceOptimistic("TEMP_REPLACED_RETRY", entry.tempId, { serverId: serverMsg.id, retryCount: entry.retryCount });
             onNewMessageRef.current(replacement, entry.tempId);
           }
         } else {
@@ -1039,18 +1077,6 @@ export default function ChatArea({
           placeholder="اكتب رسالتك..."
           value={newMessage}
           onKeyDown={(e) => e.key === "Enter" && sendMessage()}
-          onFocus={() => {
-            if (selectedUser && userId) {
-              import("@/lib/supabaseRealtime")
-                .then(({ broadcastEvent }) => {
-                  broadcastEvent(getUserChannelName(selectedUser.id), "typing", {
-                    userId,
-                    name: "",
-                  });
-                })
-                .catch(() => {});
-            }
-          }}
           onChange={(e) => {
             setNewMessage(e.target.value);
             if (e.target.value.length > 0) {

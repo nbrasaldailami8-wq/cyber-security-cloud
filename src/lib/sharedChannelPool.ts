@@ -3,6 +3,9 @@ import {
   registerChannel,
   updateChannelState,
   unregisterChannel,
+  trackListenerBind,
+  trackReconnectBind,
+  registerPoolSnapshot,
 } from "./realtimeDiagnostics";
 
 type ConnectionState = "connected" | "disconnected" | "reconnecting";
@@ -40,6 +43,18 @@ interface PoolEntry {
 
 const pool = new Map<string, PoolEntry>();
 
+registerPoolSnapshot(() => ({
+  size: pool.size,
+  entries: Array.from(pool.entries()).map(([name, entry]) => ({
+    channelName: name,
+    state: entry.state,
+    subscriberCount: entry.subscribers.size,
+    registeredEvents: Array.from(entry.registeredEvents),
+    retryCount: entry.retryCount,
+    mounted: entry.mounted,
+  })),
+}));
+
 function backoff(attempt: number): number {
   const baseMs = 1000;
   const maxMs = 30000;
@@ -64,7 +79,6 @@ function registerEventListeners(entry: PoolEntry, events: string[]) {
   if (!entry.channel) return;
   for (const evt of events) {
     if (entry.registeredEvents.has(evt)) continue;
-    entry.registeredEvents.add(evt);
     entry.channel.on("broadcast", { event: evt }, (payload: any) => {
       if (!entry.mounted) return;
       for (const [, sub] of entry.subscribers) {
@@ -72,6 +86,8 @@ function registerEventListeners(entry: PoolEntry, events: string[]) {
         if (h) h.handler(payload.payload);
       }
     });
+    trackListenerBind();
+    entry.registeredEvents.add(evt);
   }
 }
 
@@ -89,16 +105,41 @@ function collectNewEvents(entry: PoolEntry): string[] {
   return result;
 }
 
+function collectAllEvents(entry: PoolEntry): string[] {
+  const active = new Set<string>();
+  for (const [, sub] of entry.subscribers) {
+    for (const h of sub.handlersRef.current) {
+      active.add(h.event);
+    }
+  }
+  return Array.from(active);
+}
+
 function subscribePoolEntry(entry: PoolEntry) {
   if (!entry.mounted) return;
 
   const supabase = getSupabase();
+
+  // V011: Orphaned channel cleanup — remove old channel before creating fresh one
+  if (entry.channel) {
+    supabase.removeChannel(entry.channel).catch(() => {});
+    entry.channel = null;
+  }
+
   const channel = supabase.channel(entry.channelName);
 
-  // Register all currently known events
-  registerEventListeners(entry, Array.from(entry.registeredEvents));
+  entry.channel = channel;
+  entry.registeredEvents.clear();
+
+  if (entry.retryCount > 0) trackReconnectBind();
+
+  // Register all events from all current subscribers on the fresh channel
+  const allEvents = collectAllEvents(entry);
+  registerEventListeners(entry, allEvents);
 
   channel.subscribe((status: string) => {
+    // V012: Stale callback guard — fail fast if channel has been replaced since subscription
+    if (entry.channel !== channel) return;
     if (!entry.mounted) return;
     updateChannelState(entry.channelName, status);
     if (status === "SUBSCRIBED") {
@@ -117,11 +158,13 @@ function subscribePoolEntry(entry: PoolEntry) {
       entry.lastReconnectAt = Date.now();
       notifyAll(entry, "reconnecting");
       const delay = backoff(entry.retryCount);
-      entry.retryTimer = setTimeout(() => subscribePoolEntry(entry), delay);
+      // V017: Null stale retry timer before scheduling new retry to avoid stale reference
+      entry.retryTimer = setTimeout(() => {
+        entry.retryTimer = null;
+        subscribePoolEntry(entry);
+      }, delay);
     }
   });
-
-  entry.channel = channel;
 }
 
 export interface SharedSubscription {
@@ -167,7 +210,6 @@ export function joinSharedChannel(
 
   // Register any new events this subscriber brings
   const newEvents = collectNewEvents(entry);
-  for (const evt of newEvents) entry.registeredEvents.add(evt);
   registerEventListeners(entry, newEvents);
 
   const eventNames = Array.from(entry.registeredEvents).sort().join(",");
@@ -190,7 +232,6 @@ export function joinSharedChannel(
       handlersRef.current = newHandlers;
       // Register any new events the subscriber may have added
       const added = collectNewEvents(entry);
-      for (const evt of added) entry.registeredEvents.add(evt);
       registerEventListeners(entry, added);
     },
     leave: () => {

@@ -50,6 +50,22 @@ export async function registerPushNotifications(): Promise<boolean> {
   }
 }
 
+export async function unsubscribePushNotifications(): Promise<void> {
+  if (!("serviceWorker" in navigator)) return;
+  try {
+    const registration = await navigator.serviceWorker.getRegistration();
+    if (!registration) return;
+    const subscription = await registration.pushManager.getSubscription();
+    if (subscription) {
+      await subscription.unsubscribe();
+    }
+    await fetch("/api/push/unsubscribe", { method: "DELETE" });
+    await registration.unregister();
+  } catch {
+    // best-effort, silent
+  }
+}
+
 function urlBase64ToUint8Array(base64String: string): Uint8Array {
   const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
   const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");

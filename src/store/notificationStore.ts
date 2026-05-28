@@ -19,6 +19,7 @@ interface NotificationState {
   markAsRead: (id: string) => void;
   markAllAsRead: () => void;
   fetchNotifications: () => Promise<void>;
+  clearNotifications: () => void;
 }
 
 export const useNotificationStore = create<NotificationState>((set) => ({
@@ -63,6 +64,8 @@ export const useNotificationStore = create<NotificationState>((set) => ({
       notifications: state.notifications.map((n) => ({ ...n, isRead: true })),
       unreadCount: 0,
     })),
+
+  clearNotifications: () => set({ notifications: [], unreadCount: 0 }),
 
   fetchNotifications: async () => {
     set({ isLoading: true });

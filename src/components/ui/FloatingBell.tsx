@@ -7,8 +7,8 @@ import { useToast } from "@/components/ui/Toast";
 import { useAuthStore } from "@/store/authStore";
 import { csrfFetch } from "@/lib/csrfClient";
 import { useSupabaseRealtime } from "@/hooks/useSupabaseRealtime";
-import { trackNotifRefresh, trackNotifDedup, trackNotifReconnect } from "@/lib/realtimeDiagnostics";
-import { isAudioAuthorized, trackAudioPlayed, trackAudioSkippedHidden, trackAudioSkippedThrottle, trackAudioSkippedInactiveTab, trackAudioSkippedUnmounted, trackAudioDuplicatePrevented } from "@/lib/supabaseRealtime";
+import { trackNotifRefresh, trackNotifDedup, trackNotifReconnect, traceAudio, traceAudioForensic, traceLifecycle, traceAsyncRequest, traceAsyncResponse, traceRealtimeEvent, getLastRealtimeMutationAt } from "@/lib/realtimeDiagnostics";
+import { isAudioAuthorized, isToastAuthorized, trackAudioPlayed, trackAudioSkippedHidden, trackAudioSkippedThrottle, trackAudioSkippedInactiveTab, trackAudioSkippedUnmounted, trackAudioDuplicatePrevented } from "@/lib/supabaseRealtime";
 
 interface NotificationItem {
   id: string;
@@ -59,18 +59,25 @@ export default function FloatingBell() {
   const mountedRef = useRef(true);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const processedIdsRef = useRef<Set<string>>(new Set());
+  const processedIdTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
   const lastSoundTimeRef = useRef(0);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const prevConnectionRef = useRef<string>("disconnected");
   const reconnectCooldownRef = useRef(0);
   const MAX_PROCESSED_IDS = 500;
+  const hiddenToastQueueRef = useRef<Array<{id: string; title: string; body: string; timestamp: number}>>([]);
+  const notificationStormTimersRef = useRef<number[]>([]);
+  const stormActiveRef = useRef(false);
+  const stormCooldownRef = useRef(0);
+  const pushPermissionRef = useRef<NotificationPermission | null>(null);
 
   // تنظيف معرفات التكرار: إزالة الأقدم عند تجاوز الحد
   const markIdProcessed = useCallback((id: string) => {
     processedIdsRef.current.add(id);
-    setTimeout(() => {
+    const expiryTimer = setTimeout(() => {
       processedIdsRef.current?.delete(id);
     }, 60000);
+    processedIdTimersRef.current.push(expiryTimer);
     // Hard cap: إزالة الأقدم عند تجاوز الحد (Set يحافظ على ترتيب الإدراج)
     if (processedIdsRef.current.size > MAX_PROCESSED_IDS) {
       const toRemove = processedIdsRef.current.size - MAX_PROCESSED_IDS;
@@ -97,65 +104,158 @@ export default function FloatingBell() {
     }, 300);
   }, []);
 
+  const notificationsRef = useRef<NotificationItem[]>([]);
+  useEffect(() => { notificationsRef.current = notifications; }, [notifications]);
+
   // ==================== تحميل الإشعارات ====================
   const loadNotifications = useCallback(async () => {
     if (!userId) return;
+    const seqId = traceAsyncRequest("/api/notifications/list", "LOAD_NOTIFICATIONS", null);
+    const requestTs = Date.now();
     try {
       const res = await fetch("/api/notifications/list?page=1&limit=10");
       const data = await res.json();
       if (data.success) {
+        const prevIds = notificationsRef.current.map((n) => n.id);
+        const nextIds = (data.data || []).map((n: NotificationItem) => n.id);
         setNotifications(data.data || []);
         setUnreadCount(
           (data.data || []).filter((n: NotificationItem) => !n.isRead).length,
         );
+        traceAsyncResponse("/api/notifications/list", "LOAD_NOTIFICATIONS", seqId, requestTs, null, getLastRealtimeMutationAt() || null, { prevCount: prevIds.length, nextCount: nextIds.length });
       }
     } catch {
-      /* صامت */
+      traceAsyncResponse("/api/notifications/list", "LOAD_NOTIFICATIONS", seqId, requestTs, null, getLastRealtimeMutationAt() || null, { failed: true });
     }
   }, [userId]);
+
+  const flushHiddenToasts = useCallback(() => {
+    const queue = hiddenToastQueueRef.current;
+    if (queue.length === 0 || !mountedRef.current) return;
+    if (document.visibilityState !== "visible" || !isToastAuthorized()) return;
+    const toFlush = queue.splice(0);
+    for (const item of toFlush) {
+      if (processedIdsRef.current.has(item.id)) continue;
+      showToast(`🔔 ${item.title}: ${item.body}`, "info");
+    }
+  }, [showToast]);
 
   useEffect(() => {
     mountedRef.current = true;
     const processedIds = processedIdsRef.current;
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        flushHiddenToasts();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
     loadNotifications();
+    traceLifecycle("FloatingBell", "MOUNT", { userId });
     return () => {
       mountedRef.current = false;
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       if (refreshTimerRef.current) {
         clearTimeout(refreshTimerRef.current);
         refreshTimerRef.current = null;
       }
+      // V014: Clear all pending processedId expiry timers on unmount
+      for (const t of processedIdTimersRef.current) {
+        clearTimeout(t);
+      }
+      processedIdTimersRef.current = [];
       processedIds.clear();
       prevConnectionRef.current = "disconnected";
       reconnectCooldownRef.current = 0;
+      traceLifecycle("FloatingBell", "UNMOUNT", { userId });
     };
-  }, [loadNotifications]);
+  }, [loadNotifications, flushHiddenToasts]);
+
+  // T9: Permission state re-validation on mount + focus
+  useEffect(() => {
+    if (typeof Notification === "undefined") return;
+    const check = () => {
+      const current = Notification.permission;
+      if (pushPermissionRef.current && pushPermissionRef.current !== current) {
+        if (process.env.NODE_ENV === "development") {
+          console.log("[Push] Permission changed:", pushPermissionRef.current, "->", current);
+        }
+      }
+      pushPermissionRef.current = current;
+    };
+    check();
+    window.addEventListener("focus", check);
+    return () => window.removeEventListener("focus", check);
+  }, []);
 
   // ==================== Supabase Realtime للحظية ====================
   const { connectionState } = useSupabaseRealtime(
     `user-${userId}`,
     "notification",
     (data: any) => {
+      const arrivalTs = Date.now();
+      traceRealtimeEvent("notification", data.id || "unknown", arrivalTs, null, { type: data.type, title: data.title });
+
       // تجاهل الإشعارات المكررة عبر تتبع المعرفات في الذاكرة
       if (data.id) {
         if (processedIdsRef.current.has(data.id)) {
           trackNotifDedup();
           trackAudioDuplicatePrevented();
+          traceAudio("AUDIO_SKIPPED_DUPLICATE", data.type || "notification", { payloadId: data.id });
           return;
         }
         markIdProcessed(data.id);
       }
 
-      // تجميع التحديثات المتتالية عبر المجدول الموحد (300ms)
-      scheduleNotificationRefresh();
+      const now = Date.now();
+
+      // Storm detection: >20 notifications in 10 seconds
+      const stormTimestamps = notificationStormTimersRef.current;
+      stormTimestamps.push(now);
+      while (stormTimestamps.length > 0 && stormTimestamps[0] < now - 10000) {
+        stormTimestamps.shift();
+      }
+      if (stormTimestamps.length > 20 && !stormActiveRef.current) {
+        stormActiveRef.current = true;
+        stormCooldownRef.current = now + 10000;
+        if (document.visibilityState === "visible" && isToastAuthorized()) {
+          showToast("🔔 لديك إشعارات جديدة متعددة", "info");
+        }
+      }
+      if (stormActiveRef.current && now > stormCooldownRef.current) {
+        stormActiveRef.current = false;
+      }
+
+      // T11: Selective refresh — skip API fetch for complete message notifications
+      if (data.type !== "NEW_MESSAGE" || !data.id || !data.title || !data.body) {
+        scheduleNotificationRefresh();
+      } else {
+        setUnreadCount((prev) => prev + 1);
+        // Also add directly to popup state to keep list consistent
+        setNotifications((prev) => {
+          if (prev.some((n) => n.id === data.id)) return prev;
+          return [
+            {
+              id: data.id,
+              type: data.type,
+              title: data.title,
+              body: data.body,
+              linkUrl: data.linkUrl || undefined,
+              isRead: false,
+              createdAt: new Date().toISOString(),
+            },
+            ...prev,
+          ];
+        });
+      }
 
       // Audio guards: block sound only, not toast/state
       let shouldPlaySound = true;
-      if (!mountedRef.current) { trackAudioSkippedUnmounted(); shouldPlaySound = false; }
-      else if (document.visibilityState !== "visible") { trackAudioSkippedHidden(); shouldPlaySound = false; }
-      else if (pathname.startsWith("/chat")) { shouldPlaySound = false; }
-      else if (!isAudioAuthorized()) { trackAudioSkippedInactiveTab(); shouldPlaySound = false; }
-      if (shouldPlaySound) {
-        const now = Date.now();
+      let skipReason = "";
+      if (!mountedRef.current) { trackAudioSkippedUnmounted(); shouldPlaySound = false; skipReason = "UNMOUNTED"; }
+      else if (document.visibilityState !== "visible") { trackAudioSkippedHidden(); shouldPlaySound = false; skipReason = "HIDDEN"; }
+      else if (pathname.startsWith("/chat")) { shouldPlaySound = false; skipReason = "ROUTE_CHAT"; }
+      else if (!isAudioAuthorized()) { trackAudioSkippedInactiveTab(); shouldPlaySound = false; skipReason = "UNAUTHORIZED"; }
+      if (shouldPlaySound && !stormActiveRef.current) {
         if (now - lastSoundTimeRef.current >= 1000) {
           lastSoundTimeRef.current = now;
           try {
@@ -164,16 +264,43 @@ export default function FloatingBell() {
             }
             audioRef.current.volume = 0.5;
             audioRef.current.currentTime = 0;
-            audioRef.current.play().catch(() => {});
-          } catch {}
+            const playPromise = audioRef.current.play();
+            if (playPromise) {
+              playPromise
+                .then(() => {
+                  traceAudio("AUDIO_PLAY_CONFIRMED", data.type || "notification", { payloadId: data.id, title: data.title });
+                  traceAudioForensic("AUDIO_PLAY_CONFIRMED", data.type || "notification", "none", { payloadId: data.id, title: data.title, authorizationStatus: isAudioAuthorized() });
+                })
+                .catch((err: unknown) => {
+                  traceAudio("AUDIO_PROMISE_REJECTED", data.type || "notification", { payloadId: data.id, error: String(err), title: data.title });
+                  traceAudioForensic("AUDIO_PROMISE_REJECTED", data.type || "notification", "promise_rejected", { payloadId: data.id, error: String(err), title: data.title });
+                });
+            }
+          } catch (err) {
+            traceAudioForensic("AUDIO_PLAY_REJECTED", data.type || "notification", "exception", { payloadId: data.id, error: String(err) });
+          }
           trackAudioPlayed();
+          traceAudioForensic("AUDIO_ALLOWED", data.type || "notification", "none", { payloadId: data.id, throttleMs: now - lastSoundTimeRef.current });
         } else {
           trackAudioSkippedThrottle();
+          traceAudioForensic("AUDIO_BLOCKED_THROTTLE", data.type || "notification", "throttle", { payloadId: data.id, throttleMs: now - lastSoundTimeRef.current });
         }
+      } else if (!shouldPlaySound) {
+        const forensicLabel = "AUDIO_BLOCKED_" + skipReason;
+        traceAudio(forensicLabel, data.type || "notification", { payloadId: data.id, visibilityState: document.visibilityState, pathname });
+        traceAudioForensic(forensicLabel, data.type || "notification", skipReason.toLowerCase(), { payloadId: data.id, visibilityState: document.visibilityState, pathname, isActiveTab: isAudioAuthorized() });
       }
 
-      if (data.title && data.body) {
-        showToast(`🔔 ${data.title}: ${data.body}`, "info");
+      // T1 + T3: Hidden tab toast preservation + toast authority
+      if (data.title && data.body && !stormActiveRef.current) {
+        if (document.visibilityState === "visible" && isToastAuthorized()) {
+          showToast(`🔔 ${data.title}: ${data.body}`, "info");
+        } else if (document.visibilityState !== "visible") {
+          const queue = hiddenToastQueueRef.current;
+          if (queue.length < 5) {
+            queue.push({ id: data.id, title: data.title, body: data.body, timestamp: Date.now() });
+          }
+        }
       }
     },
   );

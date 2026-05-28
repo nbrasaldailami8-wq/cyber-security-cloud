@@ -4,7 +4,7 @@ import {
   joinSharedChannel,
   SharedSubscription,
 } from "@/lib/sharedChannelPool";
-import { getStormWarning, rtLog } from "@/lib/realtimeDiagnostics";
+import { getStormWarning, rtLog, traceLifecycle, traceRealtimeEvent } from "@/lib/realtimeDiagnostics";
 
 type EventHandler = (data: any) => void;
 
@@ -98,6 +98,7 @@ export function useSupabaseRealtime(
     mountedRef.current = true;
     const userId = extractUserId(channelName);
     userIdRef.current = userId;
+    traceLifecycle("useSupabaseRealtime", "MOUNT", { channelName, userId });
 
     authorizeChannel(channelName, userId || undefined).then((result) => {
       if (!mountedRef.current) return;
@@ -124,6 +125,7 @@ export function useSupabaseRealtime(
 
     return () => {
       mountedRef.current = false;
+      traceLifecycle("useSupabaseRealtime", "UNMOUNT", { channelName, userId });
       if (subRef.current) {
         subRef.current.leave();
         subRef.current = null;
@@ -138,9 +140,19 @@ export function useSupabaseRealtime(
       subRef.current = null;
     }
 
+    // Wrap handlers with trace instrumentation
+    const tracedHandlers = handlersRef.current.map((evt) => ({
+      event: evt.event,
+      handler: (data: any) => {
+        const arrivalTs = Date.now();
+        traceRealtimeEvent(evt.event, data?.id || data?.messageId || "unknown", arrivalTs, null, { channelName: resolvedName });
+        evt.handler(data);
+      },
+    }));
+
     subRef.current = joinSharedChannel(
       resolvedName,
-      handlersRef.current,
+      tracedHandlers,
       (state, meta) => {
         if (!mountedRef.current) return;
         setConnectionState(state);

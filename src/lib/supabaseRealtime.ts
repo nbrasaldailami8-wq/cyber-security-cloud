@@ -1,4 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
+import { tracePresence } from "./realtimeDiagnostics";
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
 const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
@@ -137,6 +138,13 @@ let visibilityRecoveryCount = 0;
 let visibilityDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let listenerMonitorInterval: ReturnType<typeof setInterval> | null = null;
 
+// Heartbeat failover: track last heartbeat from active tab
+let lastHeartbeatReceivedAt = 0;
+let watchdogInterval: ReturnType<typeof setInterval> | null = null;
+
+// Guard against duplicate initPresenceChannel calls
+let initInProgress = false;
+
 // Audio diagnostic counters
 let audioPlayed = 0;
 let audioSkippedHidden = 0;
@@ -209,6 +217,14 @@ function setupMultiTabCoordination(userId: string) {
     return;
   }
 
+  lastHeartbeatReceivedAt = Date.now();
+
+  // Re-add visibility listener if it was removed by cleanupPresence()
+  if (typeof document !== "undefined") {
+    document.removeEventListener("visibilitychange", onVisibilityChange);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+  }
+
   broadcastChannel.onmessage = (event: MessageEvent) => {
     const msg = event.data;
     if (!msg || msg.type !== "presence") return;
@@ -218,9 +234,21 @@ function setupMultiTabCoordination(userId: string) {
         goToStandby();
       }
     } else if (msg.action === "HEARTBEAT" && msg.tabId !== tabId) {
-      // نبضات من التبويب النشط
+      // Record heartbeat from active tab for failover detection
+      lastHeartbeatReceivedAt = Date.now();
     }
   };
+
+  // Start watchdog: if standby tab sees no heartbeat for >35s, claim active
+  if (watchdogInterval) clearInterval(watchdogInterval);
+  watchdogInterval = setInterval(() => {
+    if (isActiveTab) return; // active tab controls itself via heartbeat
+    const elapsed = Date.now() - lastHeartbeatReceivedAt;
+    if (elapsed > HEARTBEAT_INTERVAL * 3.5) {
+      tracePresence("PRESENCE_WATCHDOG_FAILOVER", { tabId, elapsedMs: elapsed, userId });
+      claimActive(userId);
+    }
+  }, HEARTBEAT_INTERVAL);
 
   claimActive(userId);
 }
@@ -230,7 +258,11 @@ function claimActive(userId: string) {
 
   if (isActiveTab) return;
 
+  tracePresence("PRESENCE_ACTIVE", { tabId, userId });
   isActiveTab = true;
+
+  // Reset heartbeat tracking since we are now the active tab
+  lastHeartbeatReceivedAt = Date.now();
 
   broadcastChannel?.postMessage({ type: "presence", action: "CLAIM_ACTIVE", tabId });
 
@@ -260,6 +292,7 @@ function claimActive(userId: string) {
 }
 
 function goToStandby() {
+  tracePresence("PRESENCE_STANDBY", { tabId, userId: presenceUserId });
   isActiveTab = false;
 
   clearInterval(heartbeatInterval);
@@ -279,31 +312,60 @@ function goToStandby() {
 }
 
 async function initPresenceChannel(userId: string) {
-  const channelName = await getPresenceChannelName();
-  if (!channelName) return;
+  if (initInProgress) {
+    tracePresence("PRESENCE_INIT_SKIPPED_DUPLICATE", { tabId, userId });
+    return;
+  }
+  initInProgress = true;
+  tracePresence("PRESENCE_INIT_START", { tabId, userId });
 
-  presenceUserId = userId;
-  presenceChannel = supabase.channel(channelName, {
-    config: { presence: { key: hashPresenceKey(userId) } },
-  });
+  try {
+    const channelName = await getPresenceChannelName();
+    if (!channelName) {
+      tracePresence("PRESENCE_INIT_NO_CHANNEL", { tabId, userId });
+      return;
+    }
 
-  presenceChannel
-    .on("presence", { event: "sync" }, () => {
-      const state = presenceChannel.presenceState();
-      const onlineUsers = Object.values(state).map((entry: any) => entry.userId);
-      for (const [, listener] of presenceListeners) {
-        listener.callback(onlineUsers);
-      }
-    })
-    .subscribe(async (status: string) => {
-      if (status === "SUBSCRIBED") {
-        await presenceChannel.track({
-          userId,
-          online_at: new Date().toISOString(),
-        });
-        lastSuccessfulTrackAt = Date.now();
-      }
+    presenceUserId = userId;
+    presenceChannel = supabase.channel(channelName, {
+      config: { presence: { key: hashPresenceKey(userId) } },
     });
+
+    presenceChannel
+      .on("presence", { event: "sync" }, () => {
+        const state = presenceChannel.presenceState();
+        const onlineUsers = Object.values(state).map((entry: any) => entry.userId);
+        tracePresence("PRESENCE_SYNC", { tabId, userId, onlineCount: onlineUsers.length });
+        for (const [, listener] of presenceListeners) {
+          listener.callback(onlineUsers);
+        }
+      })
+      .subscribe((status: string) => {
+        tracePresence("PRESENCE_STATUS", { tabId, userId, status });
+        if (status === "SUBSCRIBED") {
+          tracePresence("PRESENCE_SUBSCRIBED", { tabId, userId });
+          presenceChannel.track({
+            userId,
+            online_at: new Date().toISOString(),
+          })
+            .then(() => {
+              lastSuccessfulTrackAt = Date.now();
+              tracePresence("PRESENCE_TRACKED", { tabId, userId });
+            })
+            .catch((err: unknown) => {
+              tracePresence("PRESENCE_TRACK_FAILED", { tabId, userId, error: String(err) });
+            });
+        } else if (status === "CHANNEL_ERROR") {
+          tracePresence("PRESENCE_CHANNEL_ERROR", { tabId, userId });
+        } else if (status === "TIMED_OUT") {
+          tracePresence("PRESENCE_TIMED_OUT", { tabId, userId });
+        } else if (status === "CLOSED") {
+          tracePresence("PRESENCE_CLOSED", { tabId, userId });
+        }
+      });
+  } finally {
+    initInProgress = false;
+  }
 }
 
 // مراقبة الذاكرة: تسجيل عدد المستمعين كل 10 دقائق
@@ -321,35 +383,39 @@ if (typeof window !== "undefined") {
 export function trackPresence(userId: string): void {
   if (isTrackingPresence) return;
   isTrackingPresence = true;
-  try {
-    if (presenceChannel && isActiveTab) {
-      presenceUserId = userId;
-      presenceChannel
-        .track({
+
+  (async () => {
+    try {
+      if (presenceChannel && isActiveTab) {
+        tracePresence("PRESENCE_TRACK_REFRESH", { tabId, userId });
+        presenceUserId = userId;
+        await presenceChannel.track({
           userId,
           online_at: new Date().toISOString(),
-        })
-        .then(() => { lastSuccessfulTrackAt = Date.now(); })
-        .catch(() => {});
-      return;
-    }
+        });
+        lastSuccessfulTrackAt = Date.now();
+        return;
+      }
 
-    if (presenceChannel && !isActiveTab) {
-      return;
-    }
+      if (presenceChannel && !isActiveTab) {
+        tracePresence("PRESENCE_SKIPPED_STANDBY", { tabId, userId });
+        return;
+      }
 
-    if (!broadcastChannel) {
-      setupMultiTabCoordination(userId);
-    } else if (!isActiveTab) {
-      claimActive(userId);
-    } else {
-      initPresenceChannel(userId);
+      if (!broadcastChannel) {
+        setupMultiTabCoordination(userId);
+      } else if (!isActiveTab) {
+        claimActive(userId);
+      } else {
+        await initPresenceChannel(userId);
+      }
+    } catch (error) {
+      console.error("[Presence] trackPresence error:", error);
+      tracePresence("PRESENCE_ERROR", { tabId, userId, error: String(error) });
+    } finally {
+      isTrackingPresence = false;
     }
-  } catch (error) {
-    console.error("[Presence] trackPresence error:", error);
-  } finally {
-    isTrackingPresence = false;
-  }
+  })();
 }
 
 // Visibility change handling with debounce
@@ -414,9 +480,16 @@ export function isAudioAuthorized(): boolean {
   return typeof document !== "undefined" && document.visibilityState === "visible" && isActiveTab;
 }
 
+/** Returns true if this tab is authorized to show toast notifications */
+export function isToastAuthorized(): boolean {
+  return typeof document !== "undefined" && document.visibilityState === "visible" && isActiveTab;
+}
+
 /** Full cleanup — removes all presence artifacts (call on logout/unmount) */
 export function cleanupPresence(): void {
   clearInterval(heartbeatInterval);
+  if (watchdogInterval) clearInterval(watchdogInterval);
+  watchdogInterval = null;
   if (visibilityDebounceTimer) {
     clearTimeout(visibilityDebounceTimer);
     visibilityDebounceTimer = null;
@@ -434,6 +507,7 @@ export function cleanupPresence(): void {
     broadcastChannel.close();
     broadcastChannel = null;
   }
+  // Remove visibility listener — setupMultiTabCoordination re-adds it on re-init
   if (typeof document !== "undefined") {
     document.removeEventListener("visibilitychange", onVisibilityChange);
   }
@@ -442,9 +516,11 @@ export function cleanupPresence(): void {
   lastSuccessfulTrackAt = 0;
   failedHeartbeatCount = 0;
   isTrackingPresence = false;
+  lastHeartbeatReceivedAt = 0;
   heartbeatCount = 0;
   reconnectRetrackCount = 0;
   visibilityRecoveryCount = 0;
+  initInProgress = false;
   audioPlayed = 0;
   audioSkippedHidden = 0;
   audioSkippedThrottle = 0;
@@ -474,9 +550,50 @@ if (typeof window !== "undefined" && process.env.NODE_ENV === "development") {
       isTrackingPresence,
       reconnectRetrackCount,
       visibilityRecoveryCount,
+      lastHeartbeatReceivedAt,
+      watchdogActive: !!watchdogInterval,
+      initInProgress,
       heartbeatIntervalMs: HEARTBEAT_INTERVAL,
     });
   }
+
+  // Dedicated presence debug API
+  (window as any).__PRESENCE_DEBUG = {
+    channels: () => ({
+      presenceChannelExists: !!presenceChannel,
+      broadcastChannelExists: !!broadcastChannel,
+      isActiveTab,
+      tabId,
+      watchdogActive: !!watchdogInterval,
+      initInProgress,
+    }),
+    presenceState: () => {
+      if (!presenceChannel) return { error: "No presence channel" };
+      try {
+        const state = presenceChannel.presenceState();
+        return { keys: Object.keys(state), count: Object.keys(state).length };
+      } catch { return { error: "Failed to read presenceState" }; }
+    },
+    stats: () => ({
+      activeTab: isActiveTab,
+      tabId,
+      heartbeatCount,
+      failedHeartbeatCount,
+      lastSuccessfulTrackAt: lastSuccessfulTrackAt || null,
+      lastHeartbeatReceivedAt: lastHeartbeatReceivedAt || null,
+      isTrackingPresence,
+      reconnectRetrackCount,
+      visibilityRecoveryCount,
+      initInProgress,
+      listenerCount: presenceListeners.size,
+    }),
+    cleanup: () => {
+      cleanupPresence();
+    },
+    retrack: () => {
+      if (presenceUserId) trackPresence(presenceUserId);
+    },
+  };
 }
 
 const supabaseRealtime = {
@@ -487,6 +604,7 @@ const supabaseRealtime = {
   getOnlineUsers,
   isUserOnline,
   cleanupPresence,
+  isToastAuthorized,
 };
 
 export default supabaseRealtime;

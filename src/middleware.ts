@@ -55,6 +55,7 @@ const csrfExemptPaths = [
   "/api/auth/webauthn",
   "/api/auth/2fa",
   "/api/auth/verify-session",
+  "/api/realtime/authorize",
 ];
 
 const adminPaths = ["/admin"];
@@ -114,7 +115,7 @@ export async function middleware(request: NextRequest) {
   const isDev = process.env.NODE_ENV === "development";
   response.headers.set(
     "Content-Security-Policy",
-    `default-src 'self'; script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ""}; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; style-src-elem 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: https://ik.imagekit.io; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https://*.upstash.io https://*.supabase.co wss://*.supabase.co; frame-src 'self' https://www.youtube.com;`,
+    `default-src 'self'; script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ""}; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; style-src-elem 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: https://ik.imagekit.io; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https://*.upstash.io https://*.supabase.co wss://*.supabase.co; frame-src 'self' https://www.youtube.com; media-src 'self' data:;`,
   );
 
   const method = request.method;

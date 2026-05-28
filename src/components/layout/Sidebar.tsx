@@ -4,6 +4,8 @@ import { useRouter, usePathname } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import { useAuth } from "@/hooks/useAuth";
 import { useUIStore } from "@/store/uiStore";
+import { unsubscribePushNotifications } from "@/lib/pushClient";
+import { useNotificationStore } from "@/store/notificationStore";
 
 interface MenuItem {
   label: string;
@@ -217,8 +219,13 @@ export default function Sidebar() {
   };
 
   // ==================== تسجيل الخروج ====================
+  const clearNotifications = useNotificationStore((s) => s.clearNotifications);
   const handleLogout = async () => {
-    await fetch("/api/auth/logout", { method: "POST" });
+    await Promise.allSettled([
+      fetch("/api/auth/logout", { method: "POST" }),
+      unsubscribePushNotifications(),
+    ]);
+    clearNotifications();
     router.push("/login");
   };
 

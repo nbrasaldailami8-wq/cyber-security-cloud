@@ -344,6 +344,7 @@ export default function LoginPage() {
         });
         setShowWebAuthnPrompt(true);
       } else {
+        void tryEnablePush();
         redirectToDashboard(data.role);
       }
     } catch (err: any) {

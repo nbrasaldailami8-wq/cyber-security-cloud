@@ -8,6 +8,7 @@ import { broadcastEvent } from "@/lib/supabaseRealtime";
 import { getUserChannelName } from "@/lib/realtimeChannels";
 import { scanAndReject } from "@/lib/clamav";
 import { withErrorHandler } from "@/lib/errors";
+import { sendPushToUsers } from "@/lib/pushNotifications";
 
 const ACCESS_SECRET = new TextEncoder().encode(process.env.JWT_ACCESS_SECRET!);
 
@@ -152,6 +153,12 @@ export const POST = withErrorHandler(async function POST(request: NextRequest) {
         title: "تكليف جديد",
         body: `تم استلام تكليف جديد في مادة ${subject.name}`,
         linkUrl: "/teacher/assignments",
+      });
+
+      sendPushToUsers([subject.teacherId], {
+        title: "تكليف جديد",
+        body: `تم استلام تكليف جديد في مادة ${subject.name}`,
+        data: { type: "assignment" },
       });
     }
 

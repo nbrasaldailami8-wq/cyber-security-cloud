@@ -10,6 +10,23 @@ import { useAuthStore } from "@/store/authStore";
 import ChatArea from "@/components/chat/ChatArea";
 import { useSupabaseRealtime } from "@/hooks/useSupabaseRealtime";
 import { trackPresence, isAudioAuthorized, trackAudioPlayed, trackAudioSkippedHidden, trackAudioSkippedThrottle, trackAudioSkippedInactiveTab, trackAudioSkippedUnmounted } from "@/lib/supabaseRealtime";
+import {
+  traceMessageMutation,
+  traceConversationMutation,
+  traceAsyncRequest,
+  traceAsyncResponse,
+  traceRealtimeEvent,
+  traceLifecycle,
+  traceAudio,
+  traceMessageLifecycle,
+  trackMutationTimestamp,
+  getLastRealtimeMutationAt,
+  updateRealtimeLatencyMutation,
+  getLastOwner,
+  getLastRealtimeOwner,
+  traceTyping,
+  tracePresence,
+} from "@/lib/realtimeDiagnostics";
 
 // ==================== الأنواع ====================
 interface ChatUser {
@@ -75,21 +92,53 @@ export default function ChatPage() {
   useEffect(() => {
     selectedUserRef.current = selectedUser;
   }, [selectedUser]);
+  const messagesRef = useRef<Message[]>([]);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
+  const conversationsRef = useRef<Conversation[]>([]);
+  useEffect(() => { conversationsRef.current = conversations; }, [conversations]);
+  const latestRealtimeTimestampRef = useRef<number>(0);
+  const loadMsgGenRef = useRef(0);
+  const loadConvGenRef = useRef(0);
+  const realtimeDeletedIdsRef = useRef(new Set<string>());
   const messageReloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const conversationReloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastMessageSoundRef = useRef(0);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [typingUser, setTypingUser] = useState<string | null>(null);
   const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Restore selectedUser after remount (hydration guard)
+  useEffect(() => {
+    const saved = sessionStorage.getItem("chat_selectedUser");
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (parsed && parsed.id) {
+          setSelectedUser(parsed);
+        }
+      } catch { /* ignore */ }
+    }
+  }, []);
+
+  // Persist selectedUser across remounts
+  useEffect(() => {
+    if (selectedUser) {
+      sessionStorage.setItem("chat_selectedUser", JSON.stringify(selectedUser));
+    } else {
+      sessionStorage.removeItem("chat_selectedUser");
+    }
+  }, [selectedUser]);
+
   useEffect(() => {
     mountedRef.current = true;
+    traceLifecycle("ChatPage", "MOUNT", { userId, selectedUser: selectedUserRef.current?.id || null });
     return () => {
       mountedRef.current = false;
+      traceLifecycle("ChatPage", "UNMOUNT", { userId });
       if (messageReloadTimerRef.current) clearTimeout(messageReloadTimerRef.current);
       if (conversationReloadTimerRef.current) clearTimeout(conversationReloadTimerRef.current);
       if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
     };
-  }, []);
+  }, [userId]);
   const [showMobileChat, setShowMobileChat] = useState(false);
   const [convLoading, setConvLoading] = useState(true);
   const [conversationCursor, setConversationCursor] = useState<string | null>(null);
@@ -110,18 +159,55 @@ export default function ChatPage() {
   const loadConversations = useCallback(async (cursor?: string | null) => {
     if (cursor) setLoadingMoreConversations(true);
     else setConvLoading(true);
+    const gen = ++loadConvGenRef.current;
+    const requestTimestamp = Date.now();
+    const seqId = traceAsyncRequest("/api/chat/messages", "LOAD_CONVERSATIONS", selectedUserRef.current?.id, { cursor: cursor || null });
     try {
       const params = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
       const res = await fetch(`/api/chat/messages${params}`);
       const data = await res.json();
       if (data.success) {
-        setConversations((prev) =>
-          cursor ? [...prev, ...data.data] : data.data,
-        );
+        setConversations((prev) => {
+          if (gen !== loadConvGenRef.current) {
+            if (process.env.NODE_ENV === "development") console.warn("[Chat] Discarded stale loadConversations response (gen mismatch)");
+            return prev;
+          }
+          let next: Conversation[];
+          if (cursor) {
+            next = [...prev, ...data.data];
+          } else {
+            const serverIds = new Set(data.data.map((c: Conversation) => c.userId));
+            const latestRealtime = latestRealtimeTimestampRef.current;
+            if (latestRealtime > requestTimestamp) {
+              const extras = prev.filter((c: Conversation) => !serverIds.has(c.userId));
+              next = extras.length > 0 ? [...data.data, ...extras] : data.data;
+            } else {
+              next = data.data;
+            }
+          }
+          const prevConvIds = prev.map((c: Conversation) => c.userId);
+          const nextConvIds = next.map((c: Conversation) => c.userId);
+          traceConversationMutation(
+            "API",
+            cursor ? "LOAD_MORE_CONVERSATIONS" : "LOAD_CONVERSATIONS",
+            prevConvIds,
+            nextConvIds,
+            prev.filter((c: Conversation) => !c.isRead && !c.isSent).length,
+            next.filter((c: Conversation) => !c.isRead && !c.isSent).length,
+            selectedUserRef.current?.id ?? null,
+            { conversationCount: next.length },
+          );
+          trackMutationTimestamp("API_LOAD_CONVERSATIONS");
+          return next;
+        });
         setConversationCursor(data.nextCursor);
         setHasMoreConversations(!!data.nextCursor);
       }
-    } catch {}
+      traceAsyncResponse("/api/chat/messages", "LOAD_CONVERSATIONS", seqId, requestTimestamp, selectedUserRef.current?.id, getLastRealtimeMutationAt() || null, { success: data?.success });
+    } catch (e) {
+      if (process.env.NODE_ENV === "development") console.warn("[Chat] loadConversations failed:", e);
+      traceAsyncResponse("/api/chat/messages", "LOAD_CONVERSATIONS", seqId, requestTimestamp, selectedUserRef.current?.id, getLastRealtimeMutationAt() || null, { failed: true });
+    }
     setConvLoading(false);
     setLoadingMoreConversations(false);
   }, []);
@@ -135,6 +221,9 @@ export default function ChatPage() {
   // ==================== تحميل رسائل محادثة (cursor-based) ====================
   const loadMessages = useCallback(async (otherId: string, cursor?: string | null) => {
     if (cursor) setLoadingMoreMessages(true);
+    const gen = ++loadMsgGenRef.current;
+    const seqId = traceAsyncRequest("/api/chat/messages", "LOAD_MESSAGES", selectedUserRef.current?.id, { otherId, cursor: cursor || null });
+    const requestTimestamp = Date.now();
     try {
       const params = cursor
         ? `?userId=${encodeURIComponent(otherId)}&cursor=${encodeURIComponent(cursor)}`
@@ -142,13 +231,54 @@ export default function ChatPage() {
       const res = await fetch(`/api/chat/messages${params}`);
       const data = await res.json();
       if (data.success) {
-        setMessages((prev) =>
-          cursor ? [...prev, ...data.data] : data.data,
-        );
+        setMessages((prev) => {
+          // Stale response guard: if a newer request was made, discard this
+          if (gen !== loadMsgGenRef.current) {
+            if (process.env.NODE_ENV === "development") console.warn("[Chat] Discarded stale loadMessages response (gen mismatch)");
+            return prev;
+          }
+          const prevIds = prev.map((m) => m.id);
+          let next: Message[];
+          const latestRealtime = latestRealtimeTimestampRef.current;
+          if (cursor) {
+            const existingIds = new Set(prev.map((m: Message) => m.id));
+            if (latestRealtime > requestTimestamp) {
+              const cursorFiltered = data.data.filter((m: Message) => !realtimeDeletedIdsRef.current.has(m.id) && !existingIds.has(m.id));
+              next = [...prev, ...cursorFiltered];
+            } else {
+              const cursorDeduped = data.data.filter((m: Message) => !existingIds.has(m.id));
+              next = [...prev, ...cursorDeduped];
+            }
+          } else {
+            const serverIds = new Set(data.data.map((m: Message) => m.id));
+            const pending = prev.filter((m) => m.id.startsWith("temp_") && !serverIds.has(m.id) && (m.senderId === userId && m.receiverId === otherId || m.senderId === otherId && m.receiverId === userId));
+            if (latestRealtime > requestTimestamp) {
+              const prevMap = new Map(prev.map((m: Message) => [m.id, m]));
+              const mergedApi = data.data.filter((m: Message) => !realtimeDeletedIdsRef.current.has(m.id))
+                .map((m: Message) => {
+                  const prevVersion = prevMap.get(m.id);
+                  if (prevVersion && prevVersion.isEdited) return prevVersion;
+                  return m;
+                });
+              const extras = prev.filter(m => !m.id.startsWith("temp_") && !serverIds.has(m.id) && (m.senderId === userId && m.receiverId === otherId || m.senderId === otherId && m.receiverId === userId));
+              next = extras.length > 0 ? [...mergedApi, ...extras, ...pending] : (pending.length > 0 ? [...mergedApi, ...pending] : mergedApi);
+            } else {
+              next = pending.length > 0 ? [...data.data, ...pending] : data.data;
+            }
+          }
+          const nextIds = next.map((m) => m.id);
+          traceMessageMutation("API", cursor ? "LOAD_MORE_MESSAGES" : "LOAD_MESSAGES_API", prevIds, nextIds, selectedUserRef.current?.id, otherId, { cursor: !!cursor, pendingTempsPreserved: nextIds.filter(id => id.startsWith("temp_")).length });
+          trackMutationTimestamp("API_LOAD_MESSAGES");
+          return next;
+        });
         setMessageCursor(data.nextCursor);
         setHasMoreMessages(!!data.nextCursor);
       }
-    } catch {}
+      traceAsyncResponse("/api/chat/messages", "LOAD_MESSAGES", seqId, requestTimestamp, selectedUserRef.current?.id, getLastRealtimeMutationAt() || null, { otherId, cursor: !!cursor, success: data?.success });
+    } catch (e) {
+      if (process.env.NODE_ENV === "development") console.warn("[Chat] loadMessages failed:", e);
+      traceAsyncResponse("/api/chat/messages", "LOAD_MESSAGES", seqId, requestTimestamp, selectedUserRef.current?.id, getLastRealtimeMutationAt() || null, { otherId, cursor: !!cursor, failed: true });
+    }
     setLoadingMoreMessages(false);
   }, []);
 
@@ -169,6 +299,17 @@ export default function ChatPage() {
       handler: (payload: any) => {
         const data = payload;
         const currentSelected = selectedUserRef.current;
+        const arrivalTs = Date.now();
+        latestRealtimeTimestampRef.current = arrivalTs;
+        traceRealtimeEvent("new-message", data.id || data.tempId, arrivalTs, currentSelected?.id, { senderId: data.senderId, receiverId: data.receiverId });
+
+        // Always refresh conversation list (debounced) for ALL incoming messages
+        if (conversationReloadTimerRef.current) clearTimeout(conversationReloadTimerRef.current);
+        conversationReloadTimerRef.current = setTimeout(() => {
+          traceAsyncRequest("/api/chat/messages", "LOAD_CONVERSATIONS_REALTIME", selectedUserRef.current?.id, { trigger: "new-message" });
+          loadConversations();
+        }, 300);
+
         if (
           currentSelected &&
           (data.senderId === currentSelected.id ||
@@ -178,14 +319,18 @@ export default function ChatPage() {
           if (data.senderId !== userId) {
             if (!mountedRef.current) {
               trackAudioSkippedUnmounted();
+              traceAudio("AUDIO_SKIPPED_UNMOUNTED", "NEW_MESSAGE", { senderId: data.senderId, payloadId: data.id });
             } else if (document.visibilityState !== "visible") {
               trackAudioSkippedHidden();
+              traceAudio("AUDIO_SKIPPED_HIDDEN", "NEW_MESSAGE", { visibilityState: document.visibilityState, senderId: data.senderId, payloadId: data.id });
             } else if (!isAudioAuthorized()) {
               trackAudioSkippedInactiveTab();
+              traceAudio("AUDIO_SKIPPED_UNAUTHORIZED", "NEW_MESSAGE", { senderId: data.senderId, payloadId: data.id });
             } else {
               const now = Date.now();
               if (now - lastMessageSoundRef.current < 1000) {
                 trackAudioSkippedThrottle();
+                traceAudio("AUDIO_SKIPPED_THROTTLE", "NEW_MESSAGE", { throttleMs: now - lastMessageSoundRef.current, senderId: data.senderId, payloadId: data.id });
               } else {
                 lastMessageSoundRef.current = now;
                 try {
@@ -194,8 +339,15 @@ export default function ChatPage() {
                   }
                   audioRef.current.volume = 0.5;
                   audioRef.current.currentTime = 0;
-                  audioRef.current.play().catch(() => {});
-                } catch {}
+                  const playPromise = audioRef.current.play();
+                  if (playPromise) {
+                    playPromise
+                      .then(() => traceAudio("AUDIO_PLAY_SUCCESS", "NEW_MESSAGE", { senderId: data.senderId, payloadId: data.id }))
+                      .catch((err: unknown) => traceAudio("AUDIO_PLAY_REJECTED", "NEW_MESSAGE", { error: String(err), senderId: data.senderId, payloadId: data.id }));
+                  }
+                } catch (err) {
+                  traceAudio("AUDIO_PLAY_REJECTED", "NEW_MESSAGE", { error: String(err), senderId: data.senderId, payloadId: data.id });
+                }
                 trackAudioPlayed();
               }
             }
@@ -205,17 +357,11 @@ export default function ChatPage() {
             if (messageReloadTimerRef.current) clearTimeout(messageReloadTimerRef.current);
             messageReloadTimerRef.current = setTimeout(() => {
               if (selectedUserRef.current?.id === targetUserId) {
+                traceAsyncRequest("/api/chat/messages", "LOAD_MESSAGES_REALTIME", selectedUserRef.current?.id, { trigger: "new-message", targetUserId });
                 loadMessages(targetUserId, null);
               }
             }, 300);
           }
-        } else if (!currentSelected) {
-          if (conversationReloadTimerRef.current) clearTimeout(conversationReloadTimerRef.current);
-          conversationReloadTimerRef.current = setTimeout(() => {
-            if (!selectedUserRef.current) {
-              loadConversations();
-            }
-          }, 300);
         }
       },
     },
@@ -224,13 +370,21 @@ export default function ChatPage() {
       handler: (payload: any) => {
         const { messageId, body } = payload;
         if (!messageId) return;
-        setMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === messageId
-              ? { ...msg, body, isEdited: true }
-              : msg
-          )
-        );
+        const handlerTs = Date.now();
+        latestRealtimeTimestampRef.current = handlerTs;
+        traceRealtimeEvent("message-edited", messageId, handlerTs, selectedUserRef.current?.id, {});
+        setMessages((prev) => {
+          const prevIds = prev.map((m) => m.id);
+          const next = prev.map((msg) =>
+            msg.id === messageId ? { ...msg, body, isEdited: true } : msg
+          );
+          traceMessageMutation("REALTIME", "MESSAGE_EDIT", prevIds, next.map((m) => m.id), selectedUserRef.current?.id, null, { messageId });
+          trackMutationTimestamp("REALTIME_MESSAGE_EDIT");
+          updateRealtimeLatencyMutation(messageId);
+          // forensic: track the edited message
+          traceMessageLifecycle("MESSAGE_EDITED", messageId, { source: "REALTIME", handlerTs });
+          return next;
+        });
       },
     },
     {
@@ -238,14 +392,30 @@ export default function ChatPage() {
       handler: (payload: any) => {
         const { messageId } = payload;
         if (!messageId) return;
-        setMessages((prev) => prev.filter((msg) => msg.id !== messageId));
+        realtimeDeletedIdsRef.current.add(messageId);
+        const handlerTs = Date.now();
+        latestRealtimeTimestampRef.current = handlerTs;
+        traceRealtimeEvent("message-deleted", messageId, handlerTs, selectedUserRef.current?.id, {});
+        setMessages((prev) => {
+          const prevIds = prev.map((m) => m.id);
+          const next = prev.filter((msg) => msg.id !== messageId);
+          traceMessageMutation("REALTIME", "MESSAGE_DELETE", prevIds, next.map((m) => m.id), selectedUserRef.current?.id, null, { messageId });
+          trackMutationTimestamp("REALTIME_MESSAGE_DELETE");
+          updateRealtimeLatencyMutation(messageId);
+          traceMessageLifecycle("MESSAGE_DELETED", messageId, { source: "REALTIME", handlerTs });
+          return next;
+        });
       },
     },
     {
       event: "messages-read",
       handler: (payload: any) => {
         const data = payload;
+        const handlerTs = Date.now();
+        latestRealtimeTimestampRef.current = handlerTs;
+        traceRealtimeEvent("messages-read", data?.conversationId || "unknown", handlerTs, selectedUserRef.current?.id, { isRead: data?.isRead });
         if (data && data.isRead && selectedUserRef.current) {
+          traceAsyncRequest("/api/chat/messages", "LOAD_MESSAGES_READ_RECEIPT", selectedUserRef.current?.id, { trigger: "messages-read" });
           loadMessages(selectedUserRef.current.id);
         }
       },
@@ -256,9 +426,13 @@ export default function ChatPage() {
         const data = payload;
         const currentSelected = selectedUserRef.current;
         if (data && currentSelected && data.userId === currentSelected.id) {
+          traceTyping("TYPING_START", { userId: data.userId, byUserId: data.userId, conversationWith: currentSelected.id });
           setTypingUser(data.userId);
           if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-          typingTimeoutRef.current = setTimeout(() => setTypingUser(null), 2000);
+          typingTimeoutRef.current = setTimeout(() => {
+            traceTyping("TYPING_TIMEOUT", { userId: data.userId });
+            setTypingUser(null);
+          }, 3000);
         }
       },
     },
@@ -267,6 +441,7 @@ export default function ChatPage() {
       handler: (payload: any) => {
         const data = payload;
         if (data && data.userId === selectedUserRef.current?.id) {
+          traceTyping("TYPING_STOP", { userId: data.userId });
           setTypingUser(null);
           if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
         }
@@ -276,8 +451,24 @@ export default function ChatPage() {
 
   useEffect(() => {
     if (!userId) return;
+    tracePresence("TRACK_PRESENCE_CALLED", { userId });
     trackPresence(userId);
   }, [userId]);
+  // Trace conversation switches
+  useEffect(() => {
+    traceLifecycle("ChatPage", "SELECTED_USER_CHANGE", { selectedUserId: selectedUser?.id || null, selectedUserName: selectedUser?.name || null });
+  }, [selectedUser]);
+
+  // Load messages when selectedUser is restored after remount
+  useEffect(() => {
+    if (selectedUser && messages.length === 0) {
+      traceLifecycle("ChatPage", "RESTORE_CHAT_AFTER_REMOUNT", { userId: selectedUser.id });
+      setMessageCursor(null);
+      setHasMoreMessages(false);
+      loadMessages(selectedUser.id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedUser]);
   // ==================== البحث ====================
   const searchUsers = async () => {
     if (searchTerm.length < 2 && !filterLevel && !filterRole) {
@@ -298,8 +489,16 @@ export default function ChatPage() {
   // ==================== فتح / إغلاق محادثة ====================
   const openChat = (chatUser: ChatUser | Conversation) => {
     const c = chatUser as any;
+    const prevSelectedId = selectedUserRef.current?.id;
+    const prevMsgIds = messagesRef.current.map((m) => m.id);
+    const targetUserId = c.userId || c.id;
+    traceLifecycle("ChatPage", "OPEN_CHAT", { fromUserId: prevSelectedId || null, toUserId: targetUserId, prevMessageCount: prevMsgIds.length });
+    if (prevMsgIds.length > 0) {
+      traceMessageMutation("CLIENT", "CONVERSATION_SWITCH", prevMsgIds, [], selectedUserRef.current?.id, targetUserId, { action: "open_chat", targetUserId });
+    }
+    setTypingUser(null);
     setSelectedUser({
-      id: c.userId || c.id,
+      id: targetUserId,
       name: c.name,
       role: c.role,
       level: c.level,
@@ -308,7 +507,8 @@ export default function ChatPage() {
     });
     setMessageCursor(null);
     setHasMoreMessages(false);
-    loadMessages(c.userId || c.id);
+    traceAsyncRequest("/api/chat/messages", "LOAD_MESSAGES_OPEN_CHAT", targetUserId, { targetUserId });
+    loadMessages(targetUserId);
     setShowMobileChat(true);
     setShowSearch(false);
     setSearchResults([]);
@@ -316,8 +516,12 @@ export default function ChatPage() {
   };
 
   const closeChat = () => {
+    const prevIds = messagesRef.current.map((m) => m.id);
+    const prevConversations = conversationsRef.current.map((c) => c.userId);
     setSelectedUser(null);
     setMessages([]);
+    traceMessageMutation("CLIENT", "CONVERSATION_SWITCH", prevIds, [], selectedUserRef.current?.id, null, { action: "close_chat" });
+    trackMutationTimestamp("CLIENT_CLOSE_CHAT");
     setMessageCursor(null);
     setHasMoreMessages(false);
     setShowMobileChat(false);
@@ -747,11 +951,17 @@ export default function ChatPage() {
               }}
               onConversationDeleted={loadConversations}
               onNewMessage={(msg, replaceTempId) => {
-                setMessages((prev) =>
-                  replaceTempId
+                setMessages((prev) => {
+                  const prevIds = prev.map((m) => m.id);
+                  const next = replaceTempId
                     ? prev.map((m) => (m.id === replaceTempId ? msg : m))
-                    : [...prev, msg],
-                );
+                    : [...prev, msg];
+                  const nextIds = next.map((m) => m.id);
+                  const label = replaceTempId ? "SEND_REPLACEMENT" : "OPTIMISTIC_SEND";
+                  traceMessageMutation("CLIENT", label, prevIds, nextIds, selectedUserRef.current?.id, null, { replaceTempId: replaceTempId || null, msgId: msg.id, msgSenderId: msg.senderId });
+                  trackMutationTimestamp(replaceTempId ? "CLIENT_SEND_REPLACEMENT" : "CLIENT_OPTIMISTIC_SEND");
+                  return next;
+                });
               }}
               hasMoreMessages={hasMoreMessages}
               loadingMoreMessages={loadingMoreMessages}
