@@ -270,7 +270,7 @@ export default function ChatArea({
           })
           .catch(() => {});
       }
-    }, 5000);
+    }, 3000);
   }, [selectedUser, userId]);
   // ==================== إرسال ====================
   const sendMessage = async () => {

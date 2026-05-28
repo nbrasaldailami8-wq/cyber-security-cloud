@@ -9,7 +9,7 @@ import PageTransition from "@/components/layout/PageTransition";
 import { useAuthStore } from "@/store/authStore";
 import ChatArea from "@/components/chat/ChatArea";
 import { useSupabaseRealtime } from "@/hooks/useSupabaseRealtime";
-import { trackPresence, isAudioAuthorized, trackAudioPlayed, trackAudioSkippedHidden, trackAudioSkippedThrottle, trackAudioSkippedInactiveTab, trackAudioSkippedUnmounted } from "@/lib/supabaseRealtime";
+import { trackPresence, getOnlineUsers, isAudioAuthorized, trackAudioPlayed, trackAudioSkippedHidden, trackAudioSkippedThrottle, trackAudioSkippedInactiveTab, trackAudioSkippedUnmounted } from "@/lib/supabaseRealtime";
 import {
   traceMessageMutation,
   traceConversationMutation,
@@ -106,6 +106,7 @@ export default function ChatPage() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [typingUser, setTypingUser] = useState<string | null>(null);
   const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [onlineUserIds, setOnlineUserIds] = useState<Set<string>>(new Set());
   // Restore selectedUser after remount (hydration guard)
   useEffect(() => {
     const saved = sessionStorage.getItem("chat_selectedUser");
@@ -454,6 +455,15 @@ export default function ChatPage() {
     tracePresence("TRACK_PRESENCE_CALLED", { userId });
     trackPresence(userId);
   }, [userId]);
+
+  // متابعة قائمة المستخدمين المتصلين
+  useEffect(() => {
+    if (!userId) return;
+    const unsubscribe = getOnlineUsers((users: string[]) => {
+      setOnlineUserIds(new Set(users));
+    });
+    return () => { unsubscribe(); };
+  }, [userId]);
   // Trace conversation switches
   useEffect(() => {
     traceLifecycle("ChatPage", "SELECTED_USER_CHANGE", { selectedUserId: selectedUser?.id || null, selectedUserName: selectedUser?.name || null });
@@ -547,6 +557,11 @@ export default function ChatPage() {
     state === "connected" ? "#2ea043" : state === "reconnecting" ? "#ffca28" : "#f85149";
   const getConnectionLabel = (state: string) =>
     state === "connected" ? "متصل" : state === "reconnecting" ? "إعادة اتصال..." : "غير متصل";
+  const formatTime = (d: string) =>
+    new Date(d).toLocaleTimeString("ar-YE", {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
 
   const glassStyle: React.CSSProperties = {
     background: "rgba(10, 20, 40, 0.55)",
@@ -853,6 +868,18 @@ export default function ChatPage() {
                           gap: "8px",
                         }}
                       >
+                        {onlineUserIds.has(conv.userId) && (
+                          <span
+                            style={{
+                              width: "8px",
+                              height: "8px",
+                              borderRadius: "50%",
+                              background: "#2ea043",
+                              boxShadow: "0 0 6px rgba(46,160,67,0.5)",
+                              flexShrink: 0,
+                            }}
+                          />
+                        )}
                         <span
                           style={{
                             fontWeight: 700,
@@ -891,19 +918,28 @@ export default function ChatPage() {
                         color: "#8b949e",
                         fontSize: "0.75rem",
                         marginTop: "4px",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "4px",
                       }}
                     >
-                      {conv.isSent && (
-                        <span
-                          style={{ color: conv.isRead ? "#00e5ff" : "#5a6a7a" }}
-                        >
-                          {conv.isRead ? "✓✓" : "✓"}
+                      {typingUser === conv.userId ? (
+                        <span style={{ color: "#00e5ff", fontWeight: 600 }}>
+                          ✍️ يكتب الآن...
+                        </span>
+                      ) : onlineUserIds.has(conv.userId) ? (
+                        <span style={{ color: "#2ea043", fontWeight: 600 }}>
+                          🟢 متصل الآن
+                        </span>
+                      ) : (
+                        <span style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+                          {conv.isSent && (
+                            <span
+                              style={{ color: conv.isRead ? "#00e5ff" : "#5a6a7a" }}
+                            >
+                              {conv.isRead ? "✓✓" : "✓"}
+                            </span>
+                          )}
+                          {conv.lastMessage}
                         </span>
                       )}
-                      {conv.lastMessage}
                     </div>
                   </button>
                 ))
