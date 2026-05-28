@@ -4,6 +4,7 @@ import { encryptMessage, decryptMessage } from "@/lib/crypto";
 import DOMPurify from "dompurify";
 import { JSDOM } from "jsdom";
 import { getEffectiveRole } from "@/lib/auth";
+import crypto from "crypto";
 import { getUserChannelName } from "@/lib/realtimeChannels";
 
 const purify = DOMPurify(new JSDOM("").window as any);
@@ -148,19 +149,21 @@ export class MessageService {
     const sanitized = purify.sanitize(body, { ALLOWED_TAGS: [] });
     const encryptedBody = encryptMessage(sanitized);
 
-    if (idempotencyKey) {
-      const existing = await prisma.message.findFirst({
-        where: { senderId, idempotencyKey },
-      });
-      if (existing) return { message: existing, isDuplicate: true };
+    if (!idempotencyKey) {
+      idempotencyKey = `${senderId}-${Date.now()}-${crypto.randomUUID()}`;
     }
+
+    const existing = await prisma.message.findFirst({
+      where: { senderId, idempotencyKey },
+    });
+    if (existing) return { message: existing, isDuplicate: true };
 
     const message = await prisma.message.create({
       data: {
         senderId, receiverId,
         body: encryptedBody, encrypted: true,
         ...(replyToId ? { replyToId } : {}),
-        ...(idempotencyKey ? { idempotencyKey } : {}),
+        idempotencyKey,
       },
     });
 
@@ -197,7 +200,9 @@ export class MessageService {
       const payload = { messageId, body: sanitized, updatedAt: new Date().toISOString() };
       broadcastEvent(senderChan, "message-edited", payload);
       if (receiverChan !== senderChan) broadcastEvent(receiverChan, "message-edited", payload);
-    } catch { /* صامت */ }
+    } catch (error) {
+      console.error("[MessageService] فشل بث حدث التعديل:", error);
+    }
   }
 
   static async deleteMessage(
@@ -239,7 +244,9 @@ export class MessageService {
         try {
           const { broadcastEvent } = await import("@/lib/supabaseRealtime");
           broadcastEvent(getUserChannelName(message.senderId), "message-deleted", { messageId });
-        } catch { /* صامت */ }
+        } catch (error) {
+          console.error("[MessageService] فشل بث حدث الحذف (مرسل):", error);
+        }
       } else if (message.receiverId === userId) {
         await prisma.message.update({
           where: { id: messageId },
@@ -248,7 +255,9 @@ export class MessageService {
         try {
           const { broadcastEvent } = await import("@/lib/supabaseRealtime");
           broadcastEvent(getUserChannelName(message.receiverId), "message-deleted", { messageId });
-        } catch { /* صامت */ }
+        } catch (error) {
+          console.error("[MessageService] فشل بث حدث الحذف (مستقبل):", error);
+        }
       } else {
         throw new ForbiddenError("غير مصرح");
       }
@@ -296,8 +305,8 @@ export class MessageService {
           readBy: userId,
           timestamp: new Date().toISOString(),
         });
-      } catch {
-        /* صامت */
+      } catch (error) {
+        console.error("[MessageService] فشل بث حدث القراءة:", error);
       }
     }
 
@@ -342,15 +351,28 @@ export class MessageService {
 
       const isInChatWithSender = isUserOnline(receiverId);
 
-      prisma.notification.create({
-        data: {
-          userId: receiverId,
-          type: "NEW_MESSAGE",
-          title: "رسالة جديدة",
-          body: `رسالة جديدة من ${sender.name}`,
-          linkUrl: "/chat",
-        },
-      }).catch(() => {});
+      (async () => {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            await prisma.notification.create({
+              data: {
+                userId: receiverId,
+                type: "NEW_MESSAGE",
+                title: "رسالة جديدة",
+                body: `رسالة جديدة من ${sender.name}`,
+                linkUrl: "/chat",
+              },
+            });
+            return;
+          } catch (err) {
+            if (attempt < 2) {
+              await new Promise((r) => setTimeout(r, 1000));
+            } else {
+              console.error("[MessageService] فشل إنشاء إشعار بعد 3 محاولات:", err);
+            }
+          }
+        }
+      })();
 
       const receiverChan = getUserChannelName(receiverId);
       const senderChan = getUserChannelName(senderId);
@@ -380,12 +402,16 @@ export class MessageService {
               body: `رسالة جديدة من ${sender.name}`,
               data: { url: "/chat" },
               sound: "/sounds/notification.mp3",
-            }).catch(() => {});
+            }).catch((err) => {
+              console.error("[MessageService] فشل إرسال Push Notification:", err);
+            });
           })
-          .catch(() => {});
+          .catch((err) => {
+            console.error("[MessageService] فشل تحميل pushNotifications:", err);
+          });
       }
-    } catch {
-      /* صامت */
+    } catch (error) {
+      console.error("[MessageService] فشل في إرسال الآثار الجانبية للرسالة:", error);
     }
 
     return { message, isDuplicate };

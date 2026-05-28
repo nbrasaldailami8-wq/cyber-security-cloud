@@ -19,7 +19,7 @@ export const DELETE = withErrorHandler(async function DELETE(_request: NextReque
     const { payload } = await jwtVerify(accessToken, ACCESS_SECRET);
     const userId = payload.sub as string;
 
-    await prisma.pushSubscription.delete({ where: { userId } });
+    await prisma.pushSubscription.deleteMany({ where: { userId } });
 
     return NextResponse.json({
       success: true,

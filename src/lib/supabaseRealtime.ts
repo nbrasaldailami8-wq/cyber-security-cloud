@@ -322,6 +322,7 @@ async function initPresenceChannel(userId: string) {
   try {
     const channelName = await getPresenceChannelName();
     if (!channelName) {
+      console.warn("[Presence] فشل الحصول على اسم قناة الحضور عبر /api/realtime/authorize");
       tracePresence("PRESENCE_INIT_NO_CHANNEL", { tabId, userId });
       return;
     }

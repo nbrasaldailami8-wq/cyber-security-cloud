@@ -549,8 +549,8 @@ model GenerationLog {
 // ==================== اشتراكات الإشعارات (PWA Push) ====================
 model PushSubscription {
   id         String   @id @default(uuid())
-  userId     String   @unique
-  endpoint   String
+  userId     String
+  endpoint   String   @unique
   authKey    String
   p256dhKey  String
   createdAt  DateTime @default(now())

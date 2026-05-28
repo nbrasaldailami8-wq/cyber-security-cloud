@@ -18,24 +18,45 @@ export async function sendPushNotification(
   url?: string,
 ) {
   try {
-    const subscription = await prisma.pushSubscription.findUnique({
+    const subscriptions = await prisma.pushSubscription.findMany({
       where: { userId },
     });
 
-    if (!subscription || !subscription.endpoint) return;
+    if (subscriptions.length === 0) return;
 
-    await webpush.sendNotification(
-      {
-        endpoint: subscription.endpoint,
-        keys: {
-          auth: subscription.authKey,
-          p256dh: subscription.p256dhKey,
-        },
-      },
-      JSON.stringify({ title, body, url }),
+    const payload = JSON.stringify({ title, body, url, icon: "/icons/icon-192x192.png", badge: "/icons/icon-96x96.png" });
+
+    const results = await Promise.allSettled(
+      subscriptions.map((sub) =>
+        webpush.sendNotification(
+          {
+            endpoint: sub.endpoint,
+            keys: { auth: sub.authKey, p256dh: sub.p256dhKey },
+          },
+          payload,
+        ),
+      ),
     );
-  } catch {
-    await prisma.pushSubscription.delete({ where: { userId } });
+
+    const invalidEndpoints: string[] = [];
+    results.forEach((result, index) => {
+      if (result.status === "rejected") {
+        const code = result.reason?.statusCode;
+        if (code === 410 || code === 404) {
+          invalidEndpoints.push(subscriptions[index].endpoint);
+        } else {
+          console.warn("[Push] sendPushNotification فشل:", code, result.reason?.message);
+        }
+      }
+    });
+
+    if (invalidEndpoints.length > 0) {
+      await prisma.pushSubscription.deleteMany({
+        where: { endpoint: { in: invalidEndpoints } },
+      });
+    }
+  } catch (error) {
+    console.error("[Push] sendPushNotification فشل:", error);
   }
 }
 
@@ -82,11 +103,15 @@ export async function sendPushToUsers(
       ),
     );
 
-    // حذف الاشتراكات منتهية الصلاحية
     const invalidEndpoints: string[] = [];
     results.forEach((result, index) => {
-      if (result.status === "rejected" && result.reason?.statusCode === 410) {
-        invalidEndpoints.push(subscriptions[index].endpoint);
+      if (result.status === "rejected") {
+        const code = result.reason?.statusCode;
+        if (code === 410 || code === 404) {
+          invalidEndpoints.push(subscriptions[index].endpoint);
+        } else {
+          console.warn("[Push] فشل إرسال مع كود:", code, result.reason?.message);
+        }
       }
     });
 

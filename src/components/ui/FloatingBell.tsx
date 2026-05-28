@@ -297,7 +297,7 @@ export default function FloatingBell() {
           showToast(`🔔 ${data.title}: ${data.body}`, "info");
         } else if (document.visibilityState !== "visible") {
           const queue = hiddenToastQueueRef.current;
-          if (queue.length < 5) {
+          if (queue.length < 20) {
             queue.push({ id: data.id, title: data.title, body: data.body, timestamp: Date.now() });
           }
         }

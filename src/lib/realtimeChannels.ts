@@ -1,7 +1,10 @@
 import crypto from "crypto";
 
 const CHANNEL_SECRET =
-  process.env.REALTIME_CHANNEL_SECRET || process.env.JWT_ACCESS_SECRET || "cyber-security-realtime-key";
+  process.env.REALTIME_CHANNEL_SECRET ||
+  process.env.NEXT_PUBLIC_REALTIME_CHANNEL_SECRET ||
+  process.env.JWT_ACCESS_SECRET ||
+  "cyber-security-realtime-key";
 
 function deriveHash(input: string): string {
   return crypto.createHmac("sha256", CHANNEL_SECRET).update(input).digest("hex").slice(0, 16);

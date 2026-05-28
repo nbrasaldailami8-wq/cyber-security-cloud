@@ -7,6 +7,7 @@ import ScanLine from "@/components/effects/ScanLine";
 import PageTransition from "@/components/layout/PageTransition";
 import FloatingBell from "@/components/ui/FloatingBell";
 import AnimationsProvider from "@/components/providers/AnimationsProvider";
+import UserActivityTracker from "@/components/layout/UserActivityTracker";
 import CyberGlobeWrapper from "@/components/effects/CyberGlobeWrapper";
 export const metadata: Metadata = {
   title: "سحابة الأمن السيبراني - جامعة ذمار",
@@ -57,6 +58,7 @@ export default function RootLayout({
         <div className="relative z-10">
           <ToastProvider>
             <AnimationsProvider>
+              <UserActivityTracker />
               <PageTransition>{children}</PageTransition>
               <FloatingBell />
             </AnimationsProvider>

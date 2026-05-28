@@ -33,7 +33,7 @@ self.addEventListener("push", (event) => {
         body: data.body || "",
         icon: data.icon || "/icons/icon-192x192.png",
         badge: data.badge || "/icons/icon-96x96.png",
-        data: { url: data.url || "/" },
+        data: { url: data.url || data.data?.url || "/" },
         vibrate: [200, 100, 200],
         silent: false,
         requireInteraction: data.requireInteraction || false,

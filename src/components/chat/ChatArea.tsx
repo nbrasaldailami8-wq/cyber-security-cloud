@@ -257,7 +257,6 @@ export default function ChatArea({
         .catch(() => {});
     }
   }, [selectedUser, userId]);
-  // إرسال حدث توقف الكتابة بعد 5 ثوانٍ من عدم النشاط
   const resetTypingStop = useCallback(() => {
     if (typingStopRef.current) clearTimeout(typingStopRef.current);
     typingStopRef.current = setTimeout(() => {
@@ -270,7 +269,7 @@ export default function ChatArea({
           })
           .catch(() => {});
       }
-    }, 3000);
+    }, 2000);
   }, [selectedUser, userId]);
   // ==================== إرسال ====================
   const sendMessage = async () => {

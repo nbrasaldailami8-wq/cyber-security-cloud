@@ -38,8 +38,8 @@ export const POST = withErrorHandler(async function POST(request: NextRequest) {
     }
 
     await prisma.pushSubscription.upsert({
-      where: { userId },
-      update: { endpoint, authKey, p256dhKey },
+      where: { endpoint },
+      update: { userId, authKey, p256dhKey },
       create: { userId, endpoint, authKey, p256dhKey },
     });
 
@@ -62,7 +62,7 @@ export const DELETE = withErrorHandler(async function DELETE(request: NextReques
     const { payload } = await jwtVerify(accessToken, ACCESS_SECRET);
     const userId = payload.sub as string;
 
-    await prisma.pushSubscription.delete({ where: { userId } });
+    await prisma.pushSubscription.deleteMany({ where: { userId } });
 
     return NextResponse.json({
       success: true,
